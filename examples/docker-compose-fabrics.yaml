@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2026 Contributors to the Media eXchange Layer project.
+# SPDX-License-Identifier: Apache-2.0
+name: mxl-example-fabrics
+
+# Reusable RDMA configuration block to grant hardware/network access
+x-rdma-settings: &rdma-settings
+  network_mode: "host"
+  cap_add:
+    - IPC_LOCK
+  ulimits:
+    memlock: -1
+  devices:
+    - /dev/infiniband:/dev/infiniband
+  shm_size: '2gb'
+
+volumes:
+  # Explicitly named to match the original mxl-example base compose file
+  mxl-domain:
+    name: mxl-example_mxl-domain
+    driver: local
+    driver_opts:
+      device: none
+      type: tmpfs
+      o: nosuid,strictatime,uid=1000,gid=1000,mode=0755
+
+services:
+  # SERVER B: The Receiver (Target)
+  # Start this first: docker compose -f docker-compose-fabrics.yml up fabrics-target
+  fabrics-target:
+    <<: *rdma-settings
+    build:
+      dockerfile: examples/Dockerfile
+      context: ..
+      target: mxl
+    volumes:
+      - type: volume
+        source: mxl-domain
+        target: /mxl-domain
+      - type: bind
+        source: flow-configs
+        target: /home/mxl/flow-configs
+    # Replace <RECEIVER_RDMA_IP> with Server B's physical RDMA NIC IP address
+    command: >
+      /usr/bin/mxl-fabrics-demo 
+      -d /mxl-domain 
+      -f flow-configs/flow-video-v210.json 
+      --node <RECEIVER_RDMA_IP> 
+      --service 5000 
+      --provider verbs
+
+  # SERVER A: The Sender (Initiator)
+  # Start this after generating your flow locally: TARGET_INFO="<uuid>" docker compose -f docker-compose-fabrics.yml up fabrics-initiator
+  fabrics-initiator:
+    <<: *rdma-settings
+    build:
+      dockerfile: examples/Dockerfile
+      context: ..
+      target: mxl
+    volumes:
+      - type: volume
+        source: mxl-domain
+        target: /mxl-domain
+    # Replace <SENDER_RDMA_IP> with Server A's physical RDMA NIC IP address
+    command: >
+      /usr/bin/mxl-fabrics-demo 
+      -i 
+      -d /mxl-domain 
+      -f 5fbec3b1-1b0f-417d-9059-8b94a47197ed 
+      --node <SENDER_RDMA_IP> 
+      --service 5000 
+      --provider verbs 
+      --target-info "${TARGET_INFO}"

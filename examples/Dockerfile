@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
    gstreamer1.0-plugins-base \
    curl zip unzip tar \
    dumb-init \
+   libfabric1 \
    && rm -r /var/lib/apt/lists/*
 
 
@@ -21,7 +22,8 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     git \
     libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev
+    libgstreamer-plugins-base1.0-dev \
+    libfabric-dev
 
 USER mxl
 
@@ -41,15 +43,19 @@ COPY cmake mxl/cmake
 COPY tools mxl/tools
 COPY utils mxl/utils
 
-RUN cmake -S "${HOME}/mxl" --preset Linux-GCC-Release -DCMAKE_INSTALL_PREFIX=/usr
+RUN cmake -S "${HOME}/mxl" --preset Linux-GCC-Release -DCMAKE_INSTALL_PREFIX=/usr -DMXL_ENABLE_FABRICS_OFI=ON
 RUN ninja -C "${HOME}/mxl/build/Linux-GCC-Release"
 
 USER 0:0
 RUN ninja -C "/home/mxl/mxl/build/Linux-GCC-Release" install
 
 FROM base AS mxl
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libmxl* /usr/lib/x86_64-linux-gnu/
+COPY --from=builder /usr/lib/*-linux-gnu/libmxl* /usr/lib/
 COPY --from=builder /usr/bin/mxl-* /usr/bin/
+
+# Refresh the shared library cache so Linux knows the files are there
+RUN ldconfig
+
 USER mxl
 WORKDIR /home/mxl
 ENTRYPOINT ["/bin/bash", "-c"]
