@@ -25,7 +25,6 @@ volumes:
 
 services:
   # SERVER B: The Receiver (Target)
-  # Start this first: docker compose -f docker-compose-fabrics.yml up fabrics-target
   fabrics-target:
     <<: *rdma-settings
     build:
@@ -39,9 +38,9 @@ services:
       - type: bind
         source: flow-configs
         target: /home/mxl/flow-configs
-    # Replace <RECEIVER_RDMA_IP> with Server B's physical RDMA NIC IP address
+    # Override the bash entrypoint from the Dockerfile
+    entrypoint: ["/usr/bin/mxl-fabrics-demo"]
     command: >
-      /usr/bin/mxl-fabrics-demo 
       -d /mxl-domain 
       -f flow-configs/flow-video-v210.json 
       --node <RECEIVER_RDMA_IP> 
@@ -49,7 +48,6 @@ services:
       --provider verbs
 
   # SERVER A: The Sender (Initiator)
-  # Start this after generating your flow locally: TARGET_INFO="<uuid>" docker compose -f docker-compose-fabrics.yml up fabrics-initiator
   fabrics-initiator:
     <<: *rdma-settings
     build:
@@ -60,13 +58,14 @@ services:
       - type: volume
         source: mxl-domain
         target: /mxl-domain
-    # Replace <SENDER_RDMA_IP> with Server A's physical RDMA NIC IP address
+    # Override the bash entrypoint from the Dockerfile
+    entrypoint: ["/usr/bin/mxl-fabrics-demo"]
+    # Added :- to silence the empty variable warning
     command: >
-      /usr/bin/mxl-fabrics-demo 
       -i 
       -d /mxl-domain 
       -f 5fbec3b1-1b0f-417d-9059-8b94a47197ed 
       --node <SENDER_RDMA_IP> 
       --service 5000 
       --provider verbs 
-      --target-info "${TARGET_INFO}"
+      --target-info "${TARGET_INFO:-}"
