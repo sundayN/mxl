@@ -7,8 +7,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
-#include <bits/types/struct_iovec.h>
+#include <sys/uio.h>
 
 namespace mxl::lib::fabrics::ofi
 {
@@ -39,6 +40,8 @@ namespace mxl::lib::fabrics::ofi
         std::size_t len;
         void* desc;
     };
+
+    class LocalRegionGroupSpan; // Forward declaration
 
     /** \brief Represent a scatter-gather list of source memory regions used for data transfer.
      */
@@ -98,10 +101,19 @@ namespace mxl::lib::fabrics::ofi
         }
 
         [[nodiscard]]
-        size_t size() const noexcept
+        std::size_t size() const noexcept
         {
             return _inner.size();
         }
+
+        /** \brief Return a span representing a contiguous subset of the LocalRegionGroup.
+         *
+         * \param beginIndex The starting index of the span (inclusive).
+         * \param endIndex The ending index of the span (exclusive).
+         * \return A LocalRegionGroupSpan representing the specified subset of the LocalRegionGroup.
+         */
+        [[nodiscard]]
+        LocalRegionGroupSpan span(std::size_t beginIndex, std::size_t endIndex) const;
 
     private:
         /** \brief Generate iovec array from a group of LocalRegion.
@@ -119,4 +131,44 @@ namespace mxl::lib::fabrics::ofi
         std::vector<void*> _descs;  /**< cached descriptor array */
     };
 
+    /** \brief Represent a span of a LocalRegionGroup.
+     *
+     * This is used to represent a contiguous subset of a LocalRegionGroup.
+     */
+    class LocalRegionGroupSpan
+    {
+        friend class LocalRegionGroup;
+
+    public:
+        [[nodiscard]]
+        ::iovec const* asIovec() const noexcept
+        {
+            return _iovec.data();
+        }
+
+        [[nodiscard]]
+        void* const* desc() const noexcept
+        {
+            return _descs.data();
+        }
+
+        [[nodiscard]]
+        std::size_t size() const noexcept
+        {
+            return _inner.size();
+        }
+
+        /** \brief Returns the sum of each region size in the span.
+         */
+        [[nodiscard]]
+        std::size_t byteSize() const noexcept;
+
+    private:
+        LocalRegionGroupSpan(std::span<LocalRegion const>, std::span<::iovec const>, std::span<void* const>);
+
+    private:
+        std::span<LocalRegion const> _inner;
+        std::span<::iovec const> _iovec;
+        std::span<void* const> _descs;
+    };
 }

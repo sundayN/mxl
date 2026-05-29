@@ -18,6 +18,8 @@
 #include <mxl/mxl.h>
 #include <mxl/time.h>
 #include "CLI/CLI.hpp"
+#include "mxl/dataformat.h"
+#include "mxl/flowinfo.h"
 #include "../../lib/fabrics/ofi/src/internal/Base64.hpp"
 
 /*
@@ -59,6 +61,25 @@ public:
     ~AppInitator()
     {
         mxlStatus status;
+
+        if (_initiator && _targetInfo && _targetAdded)
+        {
+            // We're done let's remove the target
+            status = mxlFabricsInitiatorRemoveTarget(_initiator, _targetInfo);
+            if (status == MXL_STATUS_OK)
+            {
+                // Wait for graceful shutdown of the connection and for all transfers to complete before exiting
+                status = mxlFabricsInitiatorMakeProgressBlocking(_initiator, 500);
+                if (status != MXL_STATUS_OK)
+                {
+                    MXL_ERROR("Failed to wait in time for remove target to complete with status '{}'", static_cast<int>(status));
+                }
+            }
+            else
+            {
+                MXL_ERROR("Failed to remove target with status '{}'", static_cast<int>(status));
+            }
+        }
 
         if (_targetInfo != nullptr)
         {
@@ -110,7 +131,7 @@ public:
             return MXL_ERR_INVALID_ARG;
         }
 
-        auto status = mxlFabricsCreateInstance(_instance, &_fabricsInstance);
+        auto status = mxlFabricsCreateInstance(_instance, nullptr, &_fabricsInstance);
         if (status != MXL_STATUS_OK)
         {
             MXL_ERROR("Failed to create fabrics instance with status '{}'", static_cast<int>(status));
@@ -132,23 +153,15 @@ public:
             return status;
         }
 
-        mxlFabricsRegions regions;
-        status = mxlFabricsRegionsForFlowReader(_reader, &regions);
-        if (status != MXL_STATUS_OK)
-        {
-            MXL_ERROR("Failed to get flow memory region with status '{}'", static_cast<int>(status));
-            return status;
-        }
-
         mxlFabricsInitiatorConfig initiatorConfig = {
+            .version = MXL_FABRICS_API_VERSION,
             .endpointAddress = {.node = _config.node ? _config.node.value().c_str() : nullptr,
                                 .service = _config.service ? _config.service.value().c_str() : nullptr},
             .provider = _config.provider,
-            .regions = regions,
-            .deviceSupport = false,
+            .reader = _reader,
         };
 
-        status = mxlFabricsInitiatorSetup(_initiator, &initiatorConfig);
+        status = mxlFabricsInitiatorSetup(_initiator, &initiatorConfig, nullptr);
         if (status != MXL_STATUS_OK)
         {
             MXL_ERROR("Failed to setup fabrics initiator with status '{}'", static_cast<int>(status));
@@ -168,6 +181,7 @@ public:
             MXL_ERROR("Failed to add target with status '{}'", static_cast<int>(status));
             return status;
         }
+        _targetAdded = true;
 
         do
         {
@@ -188,7 +202,7 @@ public:
     }
 
     mxlStatus run()
-    { // Extract the FlowInfo structure.
+    {
         mxlFlowConfigInfo configInfo;
         auto status = mxlFlowReaderGetConfigInfo(_reader, &configInfo);
         if (status != MXL_STATUS_OK)
@@ -197,6 +211,26 @@ public:
             return status;
         }
 
+        if (mxlIsDiscreteDataFormat(static_cast<int>(configInfo.common.format)))
+        {
+            status = runDiscrete(configInfo);
+        }
+        else if (mxlIsContinuousDataFormat(static_cast<int>(configInfo.common.format)))
+        {
+            status = runContinuous(configInfo);
+        }
+        else
+        {
+            MXL_ERROR("Unsupported data format {}", configInfo.common.format);
+            return MXL_ERR_INVALID_ARG;
+        }
+
+        return status;
+    }
+
+    mxlStatus runDiscrete(mxlFlowConfigInfo const& configInfo)
+    {
+        // Extract the FlowInfo structure.
         std::uint16_t slicesPerBatch = configInfo.common.maxSyncBatchSizeHint;
         MXL_INFO("Using batch size of {} slices", slicesPerBatch);
 
@@ -209,27 +243,27 @@ public:
 
         while (!g_exit_requested)
         {
-            auto ret = mxlFlowReaderGetGrainSlice(_reader, grainIndex, endSlice, 200000000, &grainInfo, &payload);
-            if (ret == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
+            auto status = mxlFlowReaderGetGrainSlice(_reader, grainIndex, endSlice, 200000000, &grainInfo, &payload);
+            if (status == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
             {
                 // We are too late.. time travel!
                 grainIndex = mxlGetCurrentIndex(&configInfo.common.grainRate);
                 continue;
             }
-            else if (ret == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
+            else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
             { // NOLINT(bugprone-branch-clone): Repeated for clarity.
                 // We are too early somehow.. retry the same grain later.
                 continue;
             }
-            else if (ret == MXL_ERR_TIMEOUT)
+            else if (status == MXL_ERR_TIMEOUT)
             {
                 // No grains available before a timeout was triggered.. most likely a problem upstream.
                 continue;
             }
-            else if (ret != MXL_STATUS_OK)
+            else if (status != MXL_STATUS_OK)
             {
                 // Something  unexpected occured, not much we can do, but log and retry
-                MXL_ERROR("Missed grain {}, err : {}", grainIndex, (int)ret);
+                MXL_ERROR("Missed grain {}, err : {}", grainIndex, (int)status);
 
                 continue;
             }
@@ -237,23 +271,24 @@ public:
             if (grainInfo.flags & MXL_GRAIN_FLAG_INVALID)
             {
                 // If we've got an invalid grain, do not waster bandwidth, transfer only the grain header and go to the next grain.
-                ret = mxlFabricsInitiatorTransferGrain(_initiator, grainIndex, 0, 0);
+                status = mxlFabricsInitiatorTransferGrain(_initiator, grainIndex, 0, 0);
                 ++grainIndex;
                 continue;
             }
 
             // Okay the grain is ready, we can transfer it to the targets.
-            ret = mxlFabricsInitiatorTransferGrain(_initiator, grainIndex, startSlice, grainInfo.validSlices);
-            if (ret == MXL_ERR_NOT_READY)
+            status = mxlFabricsInitiatorTransferGrain(_initiator, grainIndex, startSlice, grainInfo.validSlices);
+            if (status == MXL_ERR_NOT_READY)
             {
                 continue;
             }
-            if (ret != MXL_STATUS_OK)
+            if (status != MXL_STATUS_OK)
             {
-                MXL_ERROR("Failed to transfer grain with status '{}'", static_cast<int>(ret));
+                MXL_ERROR("Failed to transfer grain with status '{}'", static_cast<int>(status));
                 return status;
             }
 
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             do
             {
                 status = makeProgress(std::chrono::milliseconds(10));
@@ -267,8 +302,7 @@ public:
                     return status;
                 }
             }
-            while (status == MXL_ERR_NOT_READY);
-
+            while (status == MXL_ERR_NOT_READY && deadline > std::chrono::steady_clock::now());
             MXL_DEBUG("Transferred grain index={} slices {}-{}", grainIndex, startSlice, grainInfo.validSlices);
 
             if (grainInfo.validSlices != grainInfo.totalSlices)
@@ -285,25 +319,88 @@ public:
             ++grainIndex;
         }
 
-        status = mxlFabricsInitiatorRemoveTarget(_initiator, _targetInfo);
-        if (status != MXL_STATUS_OK)
-        {
-            return status;
-        }
+        return MXL_STATUS_OK;
+    }
 
-        do
+    mxlStatus runContinuous(mxlFlowConfigInfo const& configInfo)
+    {
+        mxlWrappedMultiBufferSlice payload;
+
+        mxlFlowRuntimeInfo runtimeInfo;
+        mxlFlowReaderGetRuntimeInfo(_reader, &runtimeInfo);
+        std::uint64_t headIndex = runtimeInfo.headIndex;
+        auto previousHeadIndex = std::uint64_t{0};
+        std::size_t batchSize = configInfo.common.maxSyncBatchSizeHint;
+        MXL_INFO("batch size in samples: {}", batchSize);
+
+        while (!g_exit_requested)
         {
-            status = makeProgress(std::chrono::milliseconds(250));
-            if (status == MXL_ERR_INTERRUPTED)
+            auto status = mxlFlowReaderGetSamplesNonBlocking(_reader, headIndex, batchSize, &payload);
+            if (status == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
             {
-                return MXL_STATUS_OK;
+                // We are too late.. time travel to the last headIndex commited!
+                mxlFlowReaderGetRuntimeInfo(_reader, &runtimeInfo);
+                previousHeadIndex = headIndex;
+                headIndex = runtimeInfo.headIndex;
+                MXL_INFO("Too late! previous headIndex={}  new headIndex={}", previousHeadIndex, headIndex);
+                continue;
             }
-            if (status != MXL_ERR_NOT_READY && status != MXL_STATUS_OK)
+            if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
             {
+                // We are too early somehow.. retry the same samples later.
+                continue;
+            }
+            if (status == MXL_ERR_TIMEOUT)
+            {
+                // No grains available before a timeout was triggered.. most likely a problem upstream.
+                continue;
+            }
+            if (status != MXL_STATUS_OK)
+            {
+                // Something  unexpected occured, not much we can do, but log and retry
+                MXL_ERROR("Missed sample index {}, err : {}", headIndex, (int)status);
+
+                continue;
+            }
+
+            // Okay the samples are ready, we can transfer it to the targets.
+            status = mxlFabricsInitiatorTransferSamples(_initiator, headIndex, batchSize);
+            if (status == MXL_ERR_NOT_READY)
+            {
+                status = mxlFabricsInitiatorMakeProgressNonBlocking(_initiator);
+                MXL_WARN("Targets not ready for transfer, makeProgress returned '{}'", static_cast<int>(status));
+                continue;
+            }
+            if (status != MXL_STATUS_OK)
+            {
+                MXL_ERROR("Failed to transfer grain with status '{}'", static_cast<int>(status));
                 return status;
             }
+
+            // wait for completion
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            do
+            {
+                status = makeProgress(std::chrono::milliseconds(10));
+                if (status == MXL_ERR_INTERRUPTED)
+                {
+                    return MXL_STATUS_OK;
+                }
+
+                if (status != MXL_ERR_NOT_READY && status != MXL_STATUS_OK)
+                {
+                    return status;
+                }
+            }
+            while (status == MXL_ERR_NOT_READY && deadline > std::chrono::steady_clock::now());
+            MXL_DEBUG("Transferred samples headIndex={} count={}", headIndex, batchSize);
+
+            previousHeadIndex = headIndex;
+
+            // If we get here, we have transfered the samples, we can work on the next samples.
+            headIndex += batchSize;
+            mxlSleepForNs(mxlGetNsUntilIndex(headIndex, &configInfo.common.grainRate));
         }
-        while (status == MXL_ERR_NOT_READY);
 
         return MXL_STATUS_OK;
     }
@@ -329,6 +426,7 @@ private:
     mxlFlowReader _reader;
     mxlFabricsInitiator _initiator;
     mxlFabricsTargetInfo _targetInfo;
+    bool _targetAdded = false;
 };
 
 class AppTarget
@@ -392,7 +490,7 @@ public:
             return MXL_ERR_INVALID_ARG;
         }
 
-        auto status = mxlFabricsCreateInstance(_instance, &_fabricsInstance);
+        auto status = mxlFabricsCreateInstance(_instance, nullptr, &_fabricsInstance);
         if (status != MXL_STATUS_OK)
         {
             MXL_ERROR("Failed to create fabrics instance with status '{}'", static_cast<int>(status));
@@ -411,14 +509,6 @@ public:
             MXL_WARN("Reusing existing flow");
         }
 
-        mxlFabricsRegions memoryRegions;
-        status = mxlFabricsRegionsForFlowWriter(_writer, &memoryRegions);
-        if (status != MXL_STATUS_OK)
-        {
-            MXL_ERROR("Failed to get flow memory region with status '{}'", static_cast<int>(status));
-            return status;
-        }
-
         status = mxlFabricsCreateTarget(_fabricsInstance, &_target);
         if (status != MXL_STATUS_OK)
         {
@@ -427,23 +517,16 @@ public:
         }
 
         mxlFabricsTargetConfig targetConfig = {
+            .version = MXL_FABRICS_API_VERSION,
             .endpointAddress = {.node = _config.node ? _config.node.value().c_str() : nullptr,
                                 .service = _config.service ? _config.service.value().c_str() : nullptr},
             .provider = _config.provider,
-            .regions = memoryRegions,
-            .deviceSupport = false,
+            .writer = _writer,
         };
-        status = mxlFabricsTargetSetup(_target, &targetConfig, &_targetInfo);
+        status = mxlFabricsTargetSetup(_target, &targetConfig, nullptr, &_targetInfo);
         if (status != MXL_STATUS_OK)
         {
             MXL_ERROR("Failed to setup fabrics target with status '{}'", static_cast<int>(status));
-            return status;
-        }
-
-        status = mxlFabricsRegionsFree(memoryRegions);
-        if (status != MXL_STATUS_OK)
-        {
-            MXL_ERROR("Failed to free memory regions with status '{}'", static_cast<int>(status));
             return status;
         }
 
@@ -476,6 +559,27 @@ public:
     }
 
     mxlStatus run()
+    {
+        mxlStatus status;
+
+        if (mxlIsDiscreteDataFormat(static_cast<int>(_configInfo.common.format)))
+        {
+            status = runDiscrete();
+        }
+        else if (mxlIsContinuousDataFormat(static_cast<int>(_configInfo.common.format)))
+        {
+            status = runContinuous();
+        }
+        else
+        {
+            MXL_ERROR("Unsupported data format {}", _configInfo.common.format);
+            return MXL_ERR_INVALID_ARG;
+        }
+
+        return status;
+    }
+
+    mxlStatus runDiscrete()
     {
         mxlGrainInfo grainInfo;
         std::uint64_t grainIndex = 0;
@@ -521,11 +625,64 @@ public:
                 return status;
             }
 
-            MXL_DEBUG("Comitted grain with index={} current index={} validSlices={} flags={}",
+            MXL_DEBUG("Committed grain with index={} current index={} validSlices={} flags={}",
                 grainIndex,
                 mxlGetCurrentIndex(&_configInfo.common.grainRate),
                 grainInfo.validSlices,
                 grainInfo.flags);
+        }
+
+        return MXL_STATUS_OK;
+    }
+
+    mxlStatus runContinuous()
+    {
+        size_t count;
+        uint64_t headIndex;
+        mxlMutableWrappedMultiBufferSlice dummySlice;
+
+        mxlStatus status;
+
+        while (!g_exit_requested)
+        {
+            status = mxlFabricsTargetReadSamples(_target, 200, &headIndex, &count);
+            if (status == MXL_ERR_TIMEOUT)
+            {
+                // No completion before a timeout was triggered, most likely a problem upstream.
+                MXL_WARN("wait for new sample timeout, most likely there is a problem upstream.");
+                continue;
+            }
+            else if (status == MXL_ERR_NOT_READY)
+            {
+                continue;
+            }
+            else if (status == MXL_ERR_INTERRUPTED)
+            {
+                return MXL_STATUS_OK;
+            }
+            else if (status != MXL_STATUS_OK)
+            {
+                MXL_ERROR("Failed to wait for samples with status '{}'", static_cast<int>(status));
+                return status;
+            }
+
+            // Here we open so that we can commit, we are not going to modify the grain as it was already modified by the initiator.
+            status = mxlFlowWriterOpenSamples(_writer, headIndex, count, &dummySlice);
+            if (status != MXL_STATUS_OK)
+            {
+                MXL_ERROR("Failed to open grain with status '{}'", static_cast<int>(status));
+                return status;
+            }
+
+            // GrainInfo and media payload was already written by the remote endpoint, we simply commit!.
+            status = mxlFlowWriterCommitSamples(_writer);
+            if (status != MXL_STATUS_OK)
+            {
+                MXL_ERROR("Failed to commit grain with status '{}'", static_cast<int>(status));
+                return status;
+            }
+
+            MXL_DEBUG("Cmomitted samples with head index={} count={}", headIndex, count);
         }
 
         return MXL_STATUS_OK;

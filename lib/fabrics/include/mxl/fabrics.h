@@ -16,6 +16,8 @@
 #include <mxl/mxl.h>
 #include <mxl/platform.h>
 
+#define MXL_FABRICS_API_VERSION 0 /**< Version of the API defined by this header. */
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -39,12 +41,6 @@ extern "C"
      *  to registered memory regions of a target.
      */
     typedef struct mxlFabricsInitiator_t* mxlFabricsInitiator;
-
-    /** A collection of memory regions that can be the target or the source of remote write operations.
-     * Can be obtained by using a flow reader or writer, and converting it to a regions collection
-     * with mxlFabricsRegionsForFlowReader() or mxlFabricsRegionsForFlowWriter().
-     */
-    typedef struct mxlFabricsRegions_t* mxlFabricsRegions;
 
     typedef enum mxlFabricsProvider_t
     {
@@ -71,60 +67,32 @@ extern "C"
      */
     typedef struct mxlFabricsTargetConfig_t
     {
+        int version;                               /**< Struct version, must be set to MXL_FABRICS_API_VERSION by the caller */
         mxlFabricsEndpointAddress endpointAddress; /**< Bind address for the local endpoint. */
         mxlFabricsProvider provider;               /**< The provider that should be used */
-        mxlFabricsRegions regions;                 /**< Local memory regions of the flow that grains should be written to. */
-        bool deviceSupport;                        /**< Require support of transfers involving device memory. */
+        mxlFlowWriter writer;                      /**< A flow writer for the flow that should be written to by remote initiators */
     } mxlFabricsTargetConfig;
 
     /** Configuration object required to set up an initiator.
      */
     typedef struct mxlFabricsInitiatorConfig_t
     {
+        int version;                               /**< Struct version, must be set to MXL_FABRICS_API_VERSION by the caller */
         mxlFabricsEndpointAddress endpointAddress; /**< Bind address for the local endpoint. */
         mxlFabricsProvider provider;               /**< The provider that should be used. */
-        mxlFabricsRegions regions;                 /**< Local memory regions of the flow that grains should source of remote write requests. */
-        bool deviceSupport;                        /**< Require support of transfers involving device memory. */
+        mxlFlowReader reader;                      /**< A flow reader that will be used as the source of write operations to remote targets. */
     } mxlFabricsInitiatorConfig;
-
-    /**
-     * Get the backing memory regions of a flow associated with a flow reader.
-     * The regions will be used to register the shared memory of the reader as source of data transfer operations.
-     * The returned object must be freed with mxlFabricsRegionsFree(). The object can be freed after the target or initiator has been created.
-     * \param in_reader FlowReader to use to obtain these regions.
-     * \param out_regions A pointer to a memory location where the address of the returned collection of memory regions will be written.
-     */
-    MXL_EXPORT
-    mxlStatus mxlFabricsRegionsForFlowReader(mxlFlowReader in_reader, mxlFabricsRegions* out_regions);
-
-    /**
-     * Get the backing memory regions of a flow associated with a flow writer.
-     * The regions will be used to register the shared memory of the writer as the target of data transfer operations.
-     * The returned object must be freed with mxlFabricsRegionsFree(). The object can be freed after the target or initiator has been created.
-     * \param in_writer FlowWriter to use to obtain these regions.
-     * \param out_regions A pointer to a memory location where the address of the returned collection of memory regions will be written.
-     */
-    MXL_EXPORT
-    mxlStatus mxlFabricsRegionsForFlowWriter(mxlFlowWriter in_writer, mxlFabricsRegions* out_regions);
-
-    /**
-     * Free a regions object previously allocated by mxlFabricsRegionsForFlowReader(), mxlFabricsRegionsForFlowWriter() or
-     * mxlFabricsRegionsFromUserBuffers().
-     * \param in_regions The regions object to free
-     * \return MXL_STATUS_OK if the regions object was freed
-     */
-    MXL_EXPORT
-    mxlStatus mxlFabricsRegionsFree(mxlFabricsRegions in_regions);
 
     /**
      * Create a new mxl-fabrics from an mxl instance. Targets and initiators created from this mxl-fabrics instance
      * will have access to the flows created in the supplied mxl instance.
      * \param in_instance An mxlInstance previously created with mxlCreateInstance().
+     * \param options A json-formatted string with options. Currently not used.
      * \param out_fabricsInstance Returns a pointer to the created mxlFabricsInstance.
      * \return MXL_STATUS_OK if the instance was successfully created
      */
     MXL_EXPORT
-    mxlStatus mxlFabricsCreateInstance(mxlInstance in_instance, mxlFabricsInstance* out_fabricsInstance);
+    mxlStatus mxlFabricsCreateInstance(mxlInstance in_instance, char const* options, mxlFabricsInstance* out_fabricsInstance);
 
     /**
      * Destroy a mxlFabricsInstance.
@@ -157,15 +125,17 @@ extern "C"
      * \param in_target A valid fabrics target
      * \param in_config The target configuration. This will be used to create an endpoint and register a memory region. The memory region
      * corresponds to the one that will be written to by the initiator.
+     * \param options A json-formatted string with options. Currently not used.
      * \param out_info An mxlFabricsTargetInfo_t object which should be shared to a remote initiator which this target should receive data from. The
      * object must be freed with mxlFabricsFreeTargetInfo().
      * \return The result code. \see mxlStatus
      */
     MXL_EXPORT
-    mxlStatus mxlFabricsTargetSetup(mxlFabricsTarget in_target, mxlFabricsTargetConfig const* in_config, mxlFabricsTargetInfo* out_info);
+    mxlStatus mxlFabricsTargetSetup(mxlFabricsTarget in_target, mxlFabricsTargetConfig const* in_config, char const* in_options,
+        mxlFabricsTargetInfo* out_info);
 
     /**
-     * Non-blocking accessor for a flow grain at a specific index.
+     * Non-blocking accessor for a flow grain.
      * \param in_target A valid fabrics target
      * \param out_grainIndex The index of the grain that was written, if any.
      * \return The result code. MXL_ERR_NOT_READY if no grain was available at the time of the call, and the call should be retried. \see mxlStatus
@@ -174,7 +144,7 @@ extern "C"
     mxlStatus mxlFabricsTargetReadGrainNonBlocking(mxlFabricsTarget in_target, uint64_t* out_grainIndex);
 
     /**
-     * Blocking accessor for a flow grain at a specific index.
+     * Blocking accessor for a flow grain.
      * \param in_target A valid fabrics target
      * \param out_grainIndex The index of the grain that was written, if any.
      * \param in_timeoutMs How long should we wait for the grain (in milliseconds)
@@ -182,6 +152,32 @@ extern "C"
      */
     MXL_EXPORT
     mxlStatus mxlFabricsTargetReadGrain(mxlFabricsTarget in_target, uint16_t in_timeoutMs, uint64_t* out_entryIndex);
+
+    /**
+     * Non-blocking accessor for a flow sample.
+     * \param in_target A valid fabrics target
+     * \param out_headIndex The head index of the samples that were written, if any.
+     * \param out_count The number of samples per channel that were written, if any.
+     * \return The result code. MXL_ERR_NOT_READY if no samples were available at the time of the call, and the call should be retried. \see mxlStatus
+     * \note One can simply pass the returned headIndex and count to the flow reader's GetSamples() function to obtain a pointer to the written
+     * samples after this call returns MXL_STATUS_OK.
+     */
+    MXL_EXPORT
+    mxlStatus mxlFabricsTargetReadSamplesNonBlocking(mxlFabricsTarget in_target, uint64_t* out_headIndex, size_t* out_count);
+
+    /**
+     * Blocking accessor for a flow sample.
+     * \param in_target A valid fabrics target
+     * \param out_headIndex The head index of the samples that were written, if any.
+     * \param out_count The number of samples per channel that were written, if any.
+     * \param in_timeoutMs How long should we wait for the samples (in milliseconds)
+     * \return The result code. MXL_ERR_NOT_READY if no samples were available before the timeout. \see mxlStatus
+     * \note One can simply pass the returned headIndex and count to the flow reader's GetSamples() function to obtain a pointer to the written
+     * samples after this call returns MXL_STATUS_OK.
+     */
+
+    MXL_EXPORT
+    mxlStatus mxlFabricsTargetReadSamples(mxlFabricsTarget in_target, uint16_t in_timeoutMs, uint64_t* out_headIndex, size_t* out_count);
 
     /**
      * Create a fabrics initiator instance.
@@ -204,10 +200,11 @@ extern "C"
      * \param in_initiator A valid fabrics initiator
      * \param in_config The initiator configuration. This will be used to create an endpoint and register a memory region. The memory region
      * corresponds to the one that will be shared with targets.
+     * \param in_options A json-formatted string with additional options
      * \return The result code. \see mxlStatus
      */
     MXL_EXPORT
-    mxlStatus mxlFabricsInitiatorSetup(mxlFabricsInitiator in_initiator, mxlFabricsInitiatorConfig const* in_config);
+    mxlStatus mxlFabricsInitiatorSetup(mxlFabricsInitiator in_initiator, mxlFabricsInitiatorConfig const* in_config, char const* in_options);
 
     /**
      * Add a target to the initiator. This will allow the initiator to send data to the target in subsequent calls to
@@ -243,6 +240,17 @@ extern "C"
     MXL_EXPORT
     mxlStatus mxlFabricsInitiatorTransferGrain(mxlFabricsInitiator in_initiator, uint64_t in_grainIndex, uint16_t in_startSlice,
         uint16_t in_endSlice);
+
+    /**
+     * Enqueue a transfer operation to all added targets. This function is always non-blocking. The transfer operation might be started right
+     * away, but is only guaranteed to have completed after mxlFabricsInitiatorMakeProgress*() no longer returns MXL_ERR_NOT_READY.
+     * \param in_initiator A valid fabrics initiator
+     * \param in_headIndex The head index to transfer.
+     * \param in_count The number of samples per channel to transfer.
+     * \return The result code. \see mxlStatus
+     */
+    MXL_EXPORT
+    mxlStatus mxlFabricsInitiatorTransferSamples(mxlFabricsInitiator in_initiator, uint64_t in_headIndex, size_t in_count);
 
     /**
      * This function must be called regularly for the initiator to make progress on queued transfer operations, connection establishment

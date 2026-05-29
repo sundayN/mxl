@@ -57,12 +57,7 @@ pub(crate) fn set_json_caps(src: &MxlSrc, json: FlowDefDetails) -> Result<(), gs
                     "framerate",
                     gst::Fraction::new(video.grain_rate.numerator, video.grain_rate.denominator),
                 )
-                .field(
-                    "interlace-mode",
-                    serde_json::to_string(&video.interlace_mode).map_err(|err| {
-                        gst::loggable_error!(CAT, "Invalid interlace-mode: {}", err)
-                    })?,
-                )
+                .field("interlace-mode", video.interlace_mode.as_str())
                 .field("colorimetry", video.colorspace.to_lowercase())
                 .build();
 
@@ -366,6 +361,13 @@ fn init_mxl_instance(domain: &str) -> Result<MxlInstance, gst::ErrorMessage> {
             ["Failed to load MXL instance: {}", e]
         )
     })?;
+
+    // Best-effort: reclaim any flow directories left behind by a writer that
+    // exited or crashed before its destructors ran. Long-running processes
+    // get a fresh GC pass every time an element opens an instance.
+    if let Err(e) = mxl_instance.garbage_collect_flows() {
+        gst::warning!(CAT, "MXL garbage collection on init failed: {}", e);
+    }
 
     Ok(mxl_instance)
 }

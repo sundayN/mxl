@@ -6,9 +6,11 @@
 #include <cassert>
 #include <cstdint>
 #include <algorithm>
-#include <bits/types/struct_iovec.h>
+#include <sys/uio.h>
 #include <mxl-internal/DiscreteFlowData.hpp>
 #include <mxl-internal/Flow.hpp>
+#include "mxl-internal/ContinuousFlowData.hpp"
+#include "mxl-internal/Instance.hpp"
 #include "mxl/dataformat.h"
 #include "mxl/fabrics.h"
 #include "mxl/flow.h"
@@ -28,15 +30,15 @@ namespace mxl::lib::fabrics::ofi
         return {Region::Location::Cuda{deviceId}};
     }
 
-    uint64_t Region::Location::id() const noexcept
+    std::uint64_t Region::Location::id() const noexcept
     {
         return std::visit(
             overloaded{
-                [](std::monostate) -> uint64_t { throw Exception::invalidState("Region type is not set"); },
-                [](Host const&) -> uint64_t { return 0; }, // Host region has no device ID
-                [](Cuda const& cuda) -> uint64_t
+                [](std::monostate) -> std::uint64_t { throw Exception::invalidState("Region type is not set"); },
+                [](Host const&) -> std::uint64_t { return 0; }, // Host region has no device ID
+                [](Cuda const& cuda) -> std::uint64_t
                 {
-                    return static_cast<uint64_t>(cuda._deviceId);
+                    return static_cast<std::uint64_t>(cuda._deviceId);
                 } // Cuda region returns its device ID
             },
             _inner);
@@ -83,7 +85,7 @@ namespace mxl::lib::fabrics::ofi
     }
 
     // Region implementations
-    ::iovec Region::iovecFromRegion(std::uintptr_t base, size_t size) noexcept
+    ::iovec Region::iovecFromRegion(std::uintptr_t base, std::size_t size) noexcept
     {
         return ::iovec{.iov_base = reinterpret_cast<void*>(base), .iov_len = size};
     }
@@ -100,14 +102,14 @@ namespace mxl::lib::fabrics::ofi
         return iovecs;
     }
 
-    MxlRegions* MxlRegions::fromAPI(mxlFabricsRegions regions) noexcept
+    MxlRegions MxlRegions::forReader(::mxlFlowReader reader)
     {
-        return reinterpret_cast<MxlRegions*>(regions);
+        return mxlFabricsRegionsFromFlow(mxl::lib::to_FlowReader(reader)->getFlowData());
     }
 
-    mxlFabricsRegions MxlRegions::toAPI() noexcept
+    MxlRegions MxlRegions::forWriter(::mxlFlowWriter writer)
     {
-        return reinterpret_cast<mxlFabricsRegions>(this);
+        return mxlFabricsRegionsFromMutableFlow(mxl::lib::to_FlowWriter(writer)->getFlowData());
     }
 
     std::vector<Region> const& MxlRegions::regions() const noexcept
@@ -118,6 +120,11 @@ namespace mxl::lib::fabrics::ofi
     DataLayout const& MxlRegions::dataLayout() const noexcept
     {
         return _layout;
+    }
+
+    std::uint32_t MxlRegions::maxSyncBatchSize() const noexcept
+    {
+        return _maxSyncBatchSize;
     }
 
     MxlRegions mxlFabricsRegionsFromMutableFlow(FlowData& flow)
@@ -157,10 +164,10 @@ namespace mxl::lib::fabrics::ofi
 
         if (mxlIsDiscreteDataFormat(static_cast<int>(flow.flowInfo()->config.common.format)))
         {
-            auto& discreteFlow = static_cast<DiscreteFlowData const&>(flow);
-            std::vector<Region> regions;
-
-            for (std::size_t i = 0; i < discreteFlow.grainCount(); ++i)
+            auto const& discreteFlow = static_cast<DiscreteFlowData const&>(flow);
+            auto regions = std::vector<Region>{};
+            regions.reserve(discreteFlow.grainCount());
+            for (auto i = std::size_t{0}; i < discreteFlow.grainCount(); ++i)
             {
                 auto grain = discreteFlow.grainAt(i);
 
@@ -168,30 +175,29 @@ namespace mxl::lib::fabrics::ofi
                 auto grainInfoSize = sizeof(GrainHeader);
                 auto grainPayloadSize = grain->header.info.grainSize;
 
-                if (flow.flowInfo()->config.common.payloadLocation != MXL_PAYLOAD_LOCATION_HOST_MEMORY)
-                {
-                    throw Exception::make(MXL_ERR_UNKNOWN,
-                        "GPU memory is not currently supported in the Flow API of MXL. Edit the code below when it is supported");
-                }
-
                 regions.emplace_back(grainInfoBaseAddr, grainInfoSize + grainPayloadSize, nullptr, nullptr, Region::Location::host());
             }
 
-            // TODO: Add an utility function to retrieve the number of available planes when alpha support is added.
-            return {std::move(regions), DataLayout::fromVideo(std::to_array(discreteFlow.flowInfo()->config.discrete.sliceSizes))};
+            return {std::move(regions),
+                DataLayout::fromDiscrete(std::to_array(discreteFlow.flowInfo()->config.discrete.sliceSizes)),
+                discreteFlow.flowInfo()->config.common.maxSyncBatchSizeHint};
         }
-        // else if (mxlIsContinuousDataFormat(flow.flowInfo()->config.common.format))
-        // {
-        //     auto& continuousFlow = static_cast<ContinuousFlowData const&>(flow);
-        //     std::vector<Region> regions;
-        //
-        //     // For the continuous flow, the data layout is a single contiguous buffer
-        //     regions.emplace_back(
-        //         reinterpret_cast<std::uintptr_t>(continuousFlow.channelData()), continuousFlow.channelDataLength(), Region::Location::host());
-        //
-        //     return {std::move(regions)};
-        // }
-        //
+        else if (mxlIsContinuousDataFormat(static_cast<int>(flow.flowInfo()->config.common.format)))
+        {
+            auto const& continuousFlow = static_cast<ContinuousFlowData const&>(flow);
+            auto regions = std::vector<Region>{};
+
+            // For the continuous flow, the data layout is a single contiguous buffer
+            regions.emplace_back(reinterpret_cast<std::uintptr_t>(continuousFlow.channelData()),
+                continuousFlow.channelDataSize(),
+                nullptr,
+                nullptr,
+                Region::Location::host());
+
+            return {std::move(regions),
+                DataLayout::fromContinuous(continuousFlow.sampleWordSize(), continuousFlow.channelCount(), continuousFlow.channelBufferLength()),
+                continuousFlow.flowInfo()->config.common.maxSyncBatchSizeHint};
+        }
         else
         {
             throw Exception::make(MXL_ERR_UNKNOWN, "Unsupported flow fromat {}", flow.flowInfo()->config.common.format);

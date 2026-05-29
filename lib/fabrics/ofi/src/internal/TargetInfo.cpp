@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "TargetInfo.hpp"
+#include <optional>
 #include <string>
 #include <picojson/wrapper.h>
 #include <uuid/uuid.h>
@@ -39,6 +40,15 @@ namespace mxl::lib::fabrics::ofi
             regions.emplace_back(region);
         }
         root["regions"] = picojson::value(regions);
+
+        if (bounceBufferInfo)
+        {
+            auto bounceBufferInfoObj = picojson::object{};
+            bounceBufferInfoObj["entryCount"] = picojson::value(std::to_string(bounceBufferInfo->entryCount));
+            bounceBufferInfoObj["entrySize"] = picojson::value(std::to_string(bounceBufferInfo->entrySize));
+            root["bounceBufferInfo"] = picojson::value(bounceBufferInfoObj);
+        }
+
         root["id"] = picojson::value(std::to_string(id));
 
         return picojson::value(root).serialize(false);
@@ -60,25 +70,33 @@ namespace mxl::lib::fabrics::ofi
 
         auto root = parsed.get<picojson::object>();
 
-        auto fabricAddress = FabricAddress::fromBase64(root.at("fabricAddress").get<std::string>());
+        auto const fabricAddress = FabricAddress::fromBase64(root.at("fabricAddress").get<std::string>());
 
         auto regions = std::vector<RemoteRegion>{};
-        auto regionsArray = root.at("regions").get<picojson::array>();
-        for (auto const& regionValue : regionsArray)
+        for (auto const& regionValue : root.at("regions").get<picojson::array>())
         {
-            auto regionObj = regionValue.get<picojson::object>();
+            auto const regionObj = regionValue.get<picojson::object>();
 
-            // Conversios of types that represent memory addresses to strings is preferred over converting to float
+            // Conversions of types that represent memory addresses to strings is preferred over converting to float
             // to make sure nobody can reduce precision when converting on the way.
-            auto addr = std::stoull(regionObj.at("addr").get<std::string>());
-            auto len = std::stoull(regionObj.at("len").get<std::string>());
-            auto rkey = std::stoull(regionObj.at("rkey").get<std::string>());
+            auto const addr = std::stoull(regionObj.at("addr").get<std::string>());
+            auto const len = std::stoull(regionObj.at("len").get<std::string>());
+            auto const rkey = std::stoull(regionObj.at("rkey").get<std::string>());
             regions.emplace_back(addr, len, rkey);
         }
 
-        auto id = std::stoull(root.at("id").get<std::string>());
+        auto bounceBufferInfo = std::optional<TargetInfoBounceBufferInfo>{std::nullopt};
+        if (root.contains("bounceBufferInfo"))
+        {
+            auto const bounceBufferInfoObj = root.at("bounceBufferInfo").get<picojson::object>();
+            auto const entryCount = std::stoull(bounceBufferInfoObj.at("entryCount").get<std::string>());
+            auto const entrySize = std::stoull(bounceBufferInfoObj.at("entrySize").get<std::string>());
+            bounceBufferInfo = std::make_optional<TargetInfoBounceBufferInfo>(entryCount, entrySize);
+        }
 
-        return {.id = id, .fabricAddress = fabricAddress, .remoteRegions = regions};
+        auto const id = std::stoull(root.at("id").get<std::string>());
+
+        return {.id = id, .fabricAddress = fabricAddress, .remoteRegions = regions, .bounceBufferInfo = bounceBufferInfo};
     }
 
     bool TargetInfo::operator==(TargetInfo const& other) const noexcept

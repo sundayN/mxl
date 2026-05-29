@@ -117,6 +117,7 @@ impl Drop for TestDomainGuard {
 /// consumer receives exact-byte matches that themselves alternate in the
 /// same order once steady state is reached.
 #[test]
+#[ignore = "MXL + GStreamer integration; opt-in with cargo test -- --ignored"]
 fn st2038_round_trip_via_mxl() {
     init();
 

@@ -62,73 +62,9 @@ namespace mxl::lib::fabrics::ofi
 }
 
 extern "C" MXL_EXPORT
-mxlStatus mxlFabricsRegionsForFlowReader(mxlFlowReader in_reader, mxlFabricsRegions* out_regions)
+mxlStatus mxlFabricsCreateInstance(mxlInstance in_instance, char const* options, mxlFabricsInstance* out_fabricsInstance)
 {
-    if ((in_reader == nullptr) || (out_regions == nullptr))
-    {
-        return MXL_ERR_INVALID_ARG;
-    }
-
-    return ofi::try_run(
-        [&]()
-        {
-            auto reader = ::mxl::lib::to_FlowReader(in_reader);
-
-            // We are leaking the ownership, the user is responsible for calling mxlFabricsRegionsFree to free the memory.
-            auto regionPtr = std::make_unique<ofi::MxlRegions>(ofi::mxlFabricsRegionsFromFlow(reader->getFlowData())).release();
-
-            *out_regions = regionPtr->toAPI();
-
-            return MXL_STATUS_OK;
-        },
-        "Failed to create regions object");
-}
-
-extern "C" MXL_EXPORT
-mxlStatus mxlFabricsRegionsForFlowWriter(mxlFlowWriter in_writer, mxlFabricsRegions* out_regions)
-{
-    if ((in_writer == nullptr) || (out_regions == nullptr))
-    {
-        return MXL_ERR_INVALID_ARG;
-    }
-
-    return ofi::try_run(
-        [&]()
-        {
-            auto writer = ::mxl::lib::to_FlowWriter(in_writer);
-
-            // We are leaking the ownership, the user is responsible for calling mxlFabricsRegionsFree to free the memory.
-            auto regionPtr = std::make_unique<ofi::MxlRegions>(ofi::mxlFabricsRegionsFromMutableFlow(writer->getFlowData())).release();
-
-            *out_regions = regionPtr->toAPI();
-
-            return MXL_STATUS_OK;
-        },
-        "Failed to create regions object");
-}
-
-extern "C" MXL_EXPORT
-mxlStatus mxlFabricsRegionsFree(mxlFabricsRegions in_regions)
-{
-    if (in_regions == nullptr)
-    {
-        return MXL_ERR_INVALID_ARG;
-    }
-
-    return ofi::try_run(
-        [&]()
-        {
-            auto regions = ofi::MxlRegions::fromAPI(in_regions);
-            delete regions;
-
-            return MXL_STATUS_OK;
-        },
-        "Failed to free regions object");
-}
-
-extern "C" MXL_EXPORT
-mxlStatus mxlFabricsCreateInstance(mxlInstance in_instance, mxlFabricsInstance* out_fabricsInstance)
-{
+    (void)options;
     if ((in_instance == nullptr) || (out_fabricsInstance == nullptr))
     {
         return MXL_ERR_INVALID_ARG;
@@ -204,8 +140,10 @@ mxlStatus mxlFabricsDestroyTarget(mxlFabricsInstance in_fabricsInstance, mxlFabr
 }
 
 extern "C" MXL_EXPORT
-mxlStatus mxlFabricsTargetSetup(mxlFabricsTarget in_target, mxlFabricsTargetConfig const* in_config, mxlFabricsTargetInfo* out_info)
+mxlStatus mxlFabricsTargetSetup(mxlFabricsTarget in_target, mxlFabricsTargetConfig const* in_config, char const* options,
+    mxlFabricsTargetInfo* out_info)
 {
+    (void)options;
     if ((in_target == nullptr) || (in_config == nullptr) || (out_info == nullptr))
     {
         return MXL_ERR_INVALID_ARG;
@@ -237,7 +175,6 @@ mxlStatus mxlFabricsTargetReadGrainNonBlocking(mxlFabricsTarget in_target, uint6
             auto res = ofi::TargetWrapper::fromAPI(in_target)->readGrain();
             if (!res)
             {
-                MXL_INFO("not ready");
                 return MXL_ERR_NOT_READY;
             }
 
@@ -268,6 +205,54 @@ mxlStatus mxlFabricsTargetReadGrain(mxlFabricsTarget in_target, uint16_t in_time
             return MXL_STATUS_OK;
         },
         "Failed to wait for new grain");
+}
+
+extern "C" MXL_EXPORT
+mxlStatus mxlFabricsTargetReadSamplesNonBlocking(mxlFabricsTarget in_target, uint64_t* out_headIndex, size_t* out_count)
+{
+    if ((in_target == nullptr) || (out_headIndex == nullptr) || (out_count == nullptr))
+    {
+        return MXL_ERR_INVALID_ARG;
+    }
+
+    return ofi::try_run(
+        [&]()
+        {
+            auto res = ofi::TargetWrapper::fromAPI(in_target)->readSamples();
+            if (!res)
+            {
+                return MXL_ERR_NOT_READY;
+            }
+
+            *out_headIndex = res->headIndex;
+            *out_count = res->count;
+            return MXL_STATUS_OK;
+        },
+        "Failed to try for new samples");
+}
+
+extern "C" MXL_EXPORT
+mxlStatus mxlFabricsTargetReadSamples(mxlFabricsTarget in_target, uint16_t in_timeoutMs, uint64_t* out_headIndex, size_t* out_count)
+{
+    if ((in_target == nullptr) || (out_headIndex == nullptr) || (out_count == nullptr))
+    {
+        return MXL_ERR_INVALID_ARG;
+    }
+
+    return ofi::try_run(
+        [&]()
+        {
+            auto res = ofi::TargetWrapper::fromAPI(in_target)->readSamplesBlocking(std::chrono::milliseconds(in_timeoutMs));
+            if (!res)
+            {
+                return MXL_ERR_NOT_READY;
+            }
+
+            *out_headIndex = res->headIndex;
+            *out_count = res->count;
+            return MXL_STATUS_OK;
+        },
+        "Failed to wait for new samples");
 }
 
 extern "C" MXL_EXPORT
@@ -308,8 +293,9 @@ mxlStatus mxlFabricsDestroyInitiator(mxlFabricsInstance in_fabricsInstance, mxlF
 }
 
 extern "C" MXL_EXPORT
-mxlStatus mxlFabricsInitiatorSetup(mxlFabricsInitiator in_initiator, mxlFabricsInitiatorConfig const* in_config)
+mxlStatus mxlFabricsInitiatorSetup(mxlFabricsInitiator in_initiator, mxlFabricsInitiatorConfig const* in_config, char const* options)
 {
+    (void)options;
     if ((in_initiator == nullptr) || (in_config == nullptr))
     {
         return MXL_ERR_INVALID_ARG;
@@ -379,6 +365,24 @@ mxlStatus mxlFabricsInitiatorTransferGrain(mxlFabricsInitiator in_initiator, uin
             return MXL_STATUS_OK;
         },
         "Failed to transfer grain");
+}
+
+extern "C" MXL_EXPORT
+mxlStatus mxlFabricsInitiatorTransferSamples(mxlFabricsInitiator in_initiator, uint64_t in_headIndex, size_t in_count)
+{
+    if (in_initiator == nullptr)
+    {
+        return MXL_ERR_INVALID_ARG;
+    }
+
+    return ofi::try_run(
+        [&]()
+        {
+            ofi::InitiatorWrapper::fromAPI(in_initiator)->transferSamples(in_headIndex, in_count);
+
+            return MXL_STATUS_OK;
+        },
+        "Failed to transfer samples");
 }
 
 extern "C" MXL_EXPORT

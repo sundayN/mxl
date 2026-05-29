@@ -33,15 +33,23 @@ namespace mxl::lib::fabrics::ofi
 
         /** \copydoc Target::readGrain()
          */
-        std::optional<Target::GrainReadResult> readGrain() final;
+        virtual std::optional<Target::GrainReadResult> readGrain() final;
 
         /** \copydoc Target::readGrainBlocking()
          */
-        std::optional<Target::GrainReadResult> readGrainBlocking(std::chrono::steady_clock::duration timeout) final;
+        virtual std::optional<Target::GrainReadResult> readGrainBlocking(std::chrono::steady_clock::duration timeout) final;
+
+        /** \copydoc Target::readSamples()
+         */
+        virtual std::optional<Target::SampleReadResult> readSamples() final;
+
+        /** copydoc Target::readSamplesBlocking()
+         */
+        virtual std::optional<Target::SampleReadResult> readSamplesBlocking(std::chrono::steady_clock::duration timeout) final;
 
         /** \brief Shut down the target.
          */
-        void shutdown() override;
+        virtual void shutdown() final;
 
     private:
         /** \brief The wait for connection request state.
@@ -89,7 +97,7 @@ namespace mxl::lib::fabrics::ofi
          * \return The result of the read operation.
          */
         template<QueueReadMode>
-        std::optional<Target::GrainReadResult> readNextGrain(std::chrono::steady_clock::duration timeout);
+        std::optional<Target::ReadResult> readNext(std::chrono::steady_clock::duration timeout);
 
         [[nodiscard]]
         static PassiveEndpoint makeListener(std::shared_ptr<Fabric> const& fabric);

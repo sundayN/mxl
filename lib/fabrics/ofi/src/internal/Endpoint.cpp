@@ -9,7 +9,7 @@
 #include <optional>
 #include <utility>
 #include <uuid.h>
-#include <bits/types/struct_iovec.h>
+#include <sys/uio.h>
 #include <mxl-internal/Logging.hpp>
 #include <rdma/fabric.h>
 #include <rdma/fi_cm.h>
@@ -315,8 +315,8 @@ namespace mxl::lib::fabrics::ofi
         return _raw;
     }
 
-    std::size_t Endpoint::writeImpl(Completion::Token token, ::iovec const* msgIov, std::size_t iovCount, void** desc, ::fi_rma_iov const* rmaIov,
-        ::fi_addr_t destAddr, std::optional<std::uint32_t> immData)
+    void Endpoint::writeImpl(Completion::Token token, ::iovec const* msgIov, std::size_t iovCount, void** desc, ::fi_rma_iov const* rmaIov,
+        ::fi_addr_t destAddr, std::optional<std::uint32_t> immData) const
     {
         std::uint64_t data = immData.value_or(0);
         std::uint64_t flags = FI_DELIVERY_COMPLETE;
@@ -334,29 +334,64 @@ namespace mxl::lib::fabrics::ofi
         };
 
         fiCall(::fi_writemsg, "Failed to push rma write to work queue.", _raw, &msg, flags);
-
-        return 1;
     }
 
     std::size_t Endpoint::write(Completion::Token token, LocalRegion const& local, RemoteRegion const& remote, ::fi_addr_t destAddr,
-        std::optional<std::uint32_t> immData)
+        std::optional<std::uint32_t> immData) const
     {
         std::vector<void*> descs{local.desc};
 
         auto msgIov = local.toIovec();
         auto rmaIov = remote.toRmaIov();
 
-        return writeImpl(token, &msgIov, 1, descs.data(), &rmaIov, destAddr, immData);
+        writeImpl(token, &msgIov, 1, descs.data(), &rmaIov, destAddr, immData);
+
+        return 1;
     }
 
     std::size_t Endpoint::write(Completion::Token token, LocalRegionGroup const& localGroup, RemoteRegion const& remote, ::fi_addr_t destAddr,
-        std::optional<std::uint32_t> immData)
+        std::optional<std::uint32_t> immData) const
     {
-        auto rmaIov = remote.toRmaIov();
-        return writeImpl(token, localGroup.asIovec(), localGroup.size(), const_cast<void**>(localGroup.desc()), &rmaIov, destAddr, immData);
+        auto remoteRmaIov = remote.toRmaIov();
+        auto remoteOffset = std::size_t{0};
+
+        auto const iovLimit = info().txIovLimit();
+        auto const nbWrites = (localGroup.size() + iovLimit - 1) / iovLimit; // ceil(group.size() / iovLimit)
+
+        for (auto i = std::size_t{0}; i < nbWrites; i++)
+        {
+            auto const begin = i * iovLimit;
+            auto const end = begin + std::min(iovLimit, localGroup.size() - begin);
+
+            auto const localGroupSpan = localGroup.span(begin, end);
+
+            // Validate that we don't bust the remote region
+            if ((remoteOffset + localGroupSpan.byteSize()) > remote.len)
+            {
+                throw Exception::invalidArgument("Local region group is too large for the remote region.");
+            }
+
+            remoteRmaIov.addr = remote.addr + remoteOffset;
+            remoteRmaIov.len = localGroupSpan.byteSize();
+
+            auto const isLastWrite = (i == nbWrites - 1);
+            auto const immDataForWrite = isLastWrite ? immData : std::nullopt;
+
+            writeImpl(token,
+                localGroupSpan.asIovec(),
+                localGroupSpan.size(),
+                const_cast<void**>(localGroupSpan.desc()),
+                &remoteRmaIov,
+                destAddr,
+                immDataForWrite);
+
+            remoteOffset += localGroupSpan.byteSize();
+        }
+
+        return nbWrites;
     }
 
-    void Endpoint::recv(LocalRegion region)
+    void Endpoint::recv(LocalRegion region) const
     {
         auto iovec = region.toIovec();
         fiCall(::fi_recv, "Failed to push recv to work queue", _raw, iovec.iov_base, iovec.iov_len, nullptr, FI_ADDR_UNSPEC, nullptr);

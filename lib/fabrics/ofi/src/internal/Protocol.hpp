@@ -32,15 +32,29 @@ namespace mxl::lib::fabrics::ofi
         [[nodiscard]]
         virtual std::vector<RemoteRegion> registerMemory(std::shared_ptr<Domain> domain) = 0;
 
+        [[nodiscard]]
+        virtual std::optional<TargetInfoBounceBufferInfo> bounceBufferInfo() const = 0;
+
         /** \brief Start receiving.
          */
-        virtual void start(Endpoint& endpoint) = 0;
+        virtual void start(Endpoint const& endpoint) = 0;
 
         /** \brief Process a completion with the given immediate data.
          * \param endpoint The endpoint associated with the completion
          * \param completion The completion object to process.
          */
-        virtual std::optional<Target::GrainReadResult> readGrain(Endpoint& endpoint, Completion const& completion) = 0;
+        [[nodiscard]]
+        virtual std::optional<Target::ReadResult> read(Endpoint const& endpoint, Completion const& completion) = 0;
+
+        /** \brief Check if this protocol can read grains.
+         */
+        [[nodiscard]]
+        virtual bool canReadGrains() const noexcept = 0;
+
+        /** \brief Check if this protocol can read samples.
+         */
+        [[nodiscard]]
+        virtual bool canReadSamples() const noexcept = 0;
 
         /** \brief Destroy the protocol object.
          */
@@ -56,16 +70,31 @@ namespace mxl::lib::fabrics::ofi
     public:
         virtual ~EgressProtocol() = default;
 
+        /** \brief Register local memory regions used in this protocol.
+         * \param domain The domain to register memory with.
+         * \note This is used to register additional local memory regions. One example of this, is in the case where there is a metadata header that
+         * needs to be transferred along with the actual data, and the header is stored in a different memory region from the data. And such memory
+         * region can only be created after the protocol template creates the protocol instance since the header content is only known after the
+         * instance is created.
+         */
+        virtual void registerMemory(std::shared_ptr<Domain> domain) = 0;
+
         /** \brief Transfer a grain to a remote target.
          * \param localRegion The local region to transfer from.
          * \param remoteIndex The index of the remote grain to transfer to.
          * \param payloadOffset The payload offset within the grain.
          * \param sliceRange The range of slices to transfer.
          * \param destAddr The destination address. This is ignored for connection-oriented endpoints.
-         * \return The number of requests posted to the endpoint work queue.
          */
-        virtual void transferGrain(Endpoint& ep, std::uint64_t localIndex, std::uint64_t remoteIndex, std::uint32_t payloadOffset,
+        virtual void transferGrain(Endpoint const& ep, std::uint64_t localIndex, std::uint64_t remoteIndex, std::uint32_t payloadOffset,
             SliceRange const& sliceRange, ::fi_addr_t destAddr = FI_ADDR_UNSPEC) = 0;
+
+        /** \brief Transfer samples to a remote target.
+         * \param headIndex The head index of the samples to transfer.
+         * \param count The number of samples per channel to transfer.
+         * \param destAddr The destination address. This is ignored for connection-oriented endpoints.
+         */
+        virtual void transferSamples(Endpoint const& ep, std::uint64_t headIndex, std::size_t count, ::fi_addr_t destAddr = FI_ADDR_UNSPEC) = 0;
 
         /** \brief Process a completion event. Any post-processing after a transfer should be done here.
          */
@@ -104,10 +133,11 @@ namespace mxl::lib::fabrics::ofi
     /** \brief Select an appropriate ingress protocol based on the data layout
      * \param layout The data layout.
      * \param regions The regions involved.
+     * \param maxSyncBatchSize The maximum batch size for transfers.
      * \return A unique pointer to the selected ingress protocol.
      */
     [[nodiscard]]
-    std::unique_ptr<IngressProtocol> selectIngressProtocol(DataLayout const& layout, std::vector<Region> regions);
+    std::unique_ptr<IngressProtocol> selectIngressProtocol(DataLayout const& layout, std::vector<Region> regions, std::uint32_t maxSyncBatchSize);
 
     /** \brief Select an appropriate egress protocol based on the data layout
      * \param layout The data layout.

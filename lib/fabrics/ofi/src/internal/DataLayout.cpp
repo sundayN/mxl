@@ -9,19 +9,36 @@
 
 namespace mxl::lib::fabrics::ofi
 {
-    DataLayout DataLayout::fromVideo(std::array<std::uint32_t, MXL_MAX_PLANES_PER_GRAIN> const& sliceSizes) noexcept
+    DataLayout DataLayout::fromDiscrete(std::array<std::uint32_t, MXL_MAX_PLANES_PER_GRAIN> const& sliceSizes) noexcept
     {
-        return DataLayout{DataLayout::VideoDataLayout{.sliceSizes = sliceSizes}};
+        return DataLayout{DataLayout::Discrete{.sliceSizes = sliceSizes}};
     };
 
-    bool DataLayout::isVideo() const noexcept
+    DataLayout DataLayout::fromContinuous(std::size_t sampleSize, std::size_t channelCount, std::size_t bufferLength) noexcept
     {
-        return std::holds_alternative<VideoDataLayout>(_inner);
+        return DataLayout{
+            DataLayout::Continuous{.sampleSize = sampleSize, .channelCount = channelCount, .bufferLength = bufferLength}
+        };
     }
 
-    DataLayout::VideoDataLayout const& DataLayout::asVideo() const noexcept
+    bool DataLayout::isDiscrete() const noexcept
     {
-        return std::get<VideoDataLayout>(_inner);
+        return std::holds_alternative<Discrete>(_inner);
+    }
+
+    bool DataLayout::isContinuous() const noexcept
+    {
+        return std::holds_alternative<Continuous>(_inner);
+    }
+
+    DataLayout::Discrete const& DataLayout::asDiscrete() const
+    {
+        return std::get<Discrete>(_inner);
+    }
+
+    DataLayout::Continuous const& DataLayout::asContinuous() const
+    {
+        return std::get<Continuous>(_inner);
     }
 
     DataLayout::DataLayout(InnerLayout inner) noexcept

@@ -9,7 +9,7 @@
 #include <variant>
 #include <vector>
 #include <uuid.h>
-#include <bits/types/struct_iovec.h>
+#include <sys/uio.h>
 #include <mxl-internal/FlowData.hpp>
 #include <rdma/fi_domain.h>
 #include "mxl/fabrics.h"
@@ -179,7 +179,7 @@ namespace mxl::lib::fabrics::ofi
         }
 
         [[nodiscard]]
-        size_t size() const noexcept
+        std::size_t size() const noexcept
         {
             return _inner.size();
         }
@@ -202,18 +202,14 @@ namespace mxl::lib::fabrics::ofi
     class MxlRegions
     {
     public:
-        MxlRegions(std::vector<Region> regions, DataLayout dataLayout)
-            : _regions(std::move(regions))
-            , _layout(dataLayout)
+        MxlRegions(std::vector<Region> regions, DataLayout dataLayout, std::uint32_t maxSyncBatchSize = 0)
+            : _regions{std::move(regions)}
+            , _layout{dataLayout}
+            , _maxSyncBatchSize{maxSyncBatchSize}
         {}
 
-        /** \brief Convert between external and internal versions of this type
-         */
-        [[nodiscard]]
-        static MxlRegions* fromAPI(mxlFabricsRegions regions) noexcept;
-
-        [[nodiscard]]
-        mxlFabricsRegions toAPI() noexcept;
+        static MxlRegions forReader(mxlFlowReader);
+        static MxlRegions forWriter(mxlFlowWriter);
 
         /** \brief View accessor for the underlying regions.
          */
@@ -223,6 +219,9 @@ namespace mxl::lib::fabrics::ofi
         [[nodiscard]]
         DataLayout const& dataLayout() const noexcept;
 
+        [[nodiscard]]
+        std::uint32_t maxSyncBatchSize() const noexcept;
+
     private:
         friend MxlRegions mxlFabricsRegionsFromFlow(FlowData& flow);
         friend MxlRegions mxlFabricsRegionsFromMutableFlow(FlowData& flow);
@@ -230,6 +229,7 @@ namespace mxl::lib::fabrics::ofi
     private:
         std::vector<Region> _regions;
         DataLayout _layout;
+        std::uint32_t _maxSyncBatchSize;
     };
 
     /** \brief Convert a FlowData's memory regions to MxlRegions.

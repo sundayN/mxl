@@ -28,8 +28,8 @@ namespace mxl::lib::fabrics::ofi
         }
 
         std::uint64_t caps = FI_RMA | FI_REMOTE_WRITE;
-        caps |= config.deviceSupport ? FI_HMEM : 0;
-
+        // To enable device memory support:
+        // caps |=  FI_HMEM;
         auto fabricInfoList = FabricInfoList::get(config.endpointAddress.node, config.endpointAddress.service, provider.value(), caps, FI_EP_RDM);
         if (fabricInfoList.begin() == fabricInfoList.end())
         {
@@ -63,9 +63,10 @@ namespace mxl::lib::fabrics::ofi
         // Connectionless endpoints must be explictely enabled when they are ready to be used.
         endpoint.enable();
 
-        auto mxlRegions = MxlRegions::fromAPI(config.regions);
-        auto protocol = selectIngressProtocol(mxlRegions->dataLayout(), mxlRegions->regions());
-        auto targetInfo = std::make_unique<TargetInfo>(endpoint.id(), endpoint.localAddress(), protocol->registerMemory(domain));
+        auto mxlRegions = MxlRegions::forWriter(config.writer);
+        auto protocol = selectIngressProtocol(mxlRegions.dataLayout(), mxlRegions.regions(), mxlRegions.maxSyncBatchSize());
+        auto targetInfo = std::make_unique<TargetInfo>(
+            endpoint.id(), endpoint.localAddress(), protocol->registerMemory(domain), protocol->bounceBufferInfo());
 
         struct MakeUniqueEnabler : RDMTarget
         {
@@ -84,24 +85,70 @@ namespace mxl::lib::fabrics::ofi
 
     std::optional<Target::GrainReadResult> RDMTarget::readGrain()
     {
-        return readNextGrain<QueueReadMode::NonBlocking>({});
+        if (!_protocol->canReadGrains())
+        {
+            throw Exception::unsupportedOperation("The current protocol does not support reading grains.");
+        }
+
+        if (auto res = readNext<QueueReadMode::NonBlocking>({}); res)
+        {
+            return std::get<Target::GrainReadResult>(*res);
+        }
+        return std::nullopt;
     }
 
     std::optional<Target::GrainReadResult> RDMTarget::readGrainBlocking(std::chrono::steady_clock::duration timeout)
     {
-        return readNextGrain<QueueReadMode::Blocking>(timeout);
+        if (!_protocol->canReadGrains())
+        {
+            throw Exception::unsupportedOperation("The current protocol does not support reading grains.");
+        }
+
+        if (auto res = readNext<QueueReadMode::Blocking>(timeout); res)
+        {
+            return std::get<Target::GrainReadResult>(*res);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<Target::SampleReadResult> RDMTarget::readSamples()
+    {
+        if (!_protocol->canReadSamples())
+        {
+            throw Exception::unsupportedOperation("The current protocol does not support reading samples.");
+        }
+
+        if (auto res = readNext<QueueReadMode::NonBlocking>({}); res)
+        {
+            return std::get<Target::SampleReadResult>(*res);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<Target::SampleReadResult> RDMTarget::readSamplesBlocking(std::chrono::steady_clock::duration timeout)
+    {
+        if (!_protocol->canReadSamples())
+        {
+            throw Exception::unsupportedOperation("The current protocol does not support reading samples.");
+        }
+
+        if (auto res = readNext<QueueReadMode::Blocking>(timeout); res)
+        {
+            return std::get<Target::SampleReadResult>(*res);
+        }
+        return std::nullopt;
     }
 
     void RDMTarget::shutdown()
     {}
 
     template<QueueReadMode queueReadMode>
-    std::optional<Target::GrainReadResult> RDMTarget::readNextGrain(std::chrono::steady_clock::duration timeout)
+    std::optional<Target::ReadResult> RDMTarget::readNext(std::chrono::steady_clock::duration timeout)
     {
         auto completion = readCompletionQueue<queueReadMode>(*_ep.completionQueue(), timeout);
         if (completion)
         {
-            return _protocol->readGrain(_ep, *completion);
+            return _protocol->read(_ep, *completion);
         }
 
         return {};

@@ -45,6 +45,7 @@ extern "C"
         MXL_ERR_NOT_READY,
         MXL_ERR_NOT_FOUND,
         MXL_ERR_EXISTS,
+        MXL_ERR_UNSUPPORTED_OPERATION,
     } mxlStatus;
 
     /// MXL SDK Semantic versionning structure.
@@ -83,8 +84,6 @@ extern "C"
     /// no longer active (in other words, no readers or writers are using them. This typically
     /// happens when an application creating flows writers crashes or exits without cleaning up.
     /// A flow is considered active if a shared advisory lock is held on the data file of the flow.
-    /// This function is automatically called when the instance is created but should be called periodically
-    /// on a long running application to clean up any flows that are no longer active.
     ///
     MXL_EXPORT
     mxlStatus mxlGarbageCollectFlows(mxlInstance in_instance);

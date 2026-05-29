@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <algorithm>
+#include <ranges>
 #include <uuid.h>
 #include <mxl-internal/Logging.hpp>
 #include <rdma/fabric.h>
@@ -26,6 +27,11 @@ namespace mxl::lib::fabrics::ofi
         , _info(std::move(info))
         , _proto(std::move(proto))
     {}
+
+    TargetInfo const& RCInitiatorEndpoint::info() const noexcept
+    {
+        return _info;
+    }
 
     bool RCInitiatorEndpoint::isIdle() const noexcept
     {
@@ -207,9 +213,17 @@ namespace mxl::lib::fabrics::ofi
     void RCInitiatorEndpoint::transferGrain(std::uint64_t localIndex, std::uint64_t remoteIndex, std::uint64_t remotePayloadOffset,
         SliceRange const& sliceRange)
     {
-        if (auto state = std::get_if<Connected>(&_state); state != nullptr)
+        if (auto const state = std::get_if<Connected>(&_state); state != nullptr)
         {
             _proto->transferGrain(state->ep, localIndex, remoteIndex, remotePayloadOffset, sliceRange);
+        }
+    }
+
+    void RCInitiatorEndpoint::transferSamples(std::uint64_t headIndex, std::size_t count)
+    {
+        if (auto const state = std::get_if<Connected>(&_state); state != nullptr)
+        {
+            _proto->transferSamples(state->ep, headIndex, count);
         }
     }
 
@@ -263,8 +277,8 @@ namespace mxl::lib::fabrics::ofi
         }
 
         uint64_t caps = FI_RMA | FI_WRITE | FI_REMOTE_WRITE;
-        caps |= config.deviceSupport ? FI_HMEM : 0;
-
+        // To enable device memory support:
+        // caps |=  FI_HMEM;
         auto fabricInfoList = FabricInfoList::get(config.endpointAddress.node, config.endpointAddress.service, provider.value(), caps, FI_EP_MSG);
 
         if (fabricInfoList.begin() == fabricInfoList.end())
@@ -281,8 +295,8 @@ namespace mxl::lib::fabrics::ofi
         auto eq = EventQueue::open(fabric);
         auto cq = CompletionQueue::open(domain);
 
-        auto regions = MxlRegions::fromAPI(config.regions);
-        auto proto = selectEgressProtocol(regions->dataLayout(), regions->regions());
+        auto regions = MxlRegions::forReader(config.reader);
+        auto proto = selectEgressProtocol(regions.dataLayout(), regions.regions());
         proto->registerMemory(domain);
 
         struct MakeUniqueEnabler : RCInitiator
@@ -309,15 +323,17 @@ namespace mxl::lib::fabrics::ofi
         auto endpoint = Endpoint::create(_domain);
         auto id = endpoint.id();
         auto proto = _proto->createInstance(Endpoint::tokenFromId(id), targetInfo);
+        proto->registerMemory(_domain);
 
         _targets.emplace(id, RCInitiatorEndpoint{std::move(endpoint), std::move(proto), targetInfo});
     }
 
     void RCInitiator::removeTarget(TargetInfo const& targetInfo)
     {
-        if (auto it = _targets.find(targetInfo.id); it != _targets.end())
+        if (auto target = std::ranges::find_if(_targets, [&targetInfo](auto const& item) { return item.second.info().id == targetInfo.id; });
+            target != _targets.end())
         {
-            it->second.shutdown();
+            target->second.shutdown();
         }
         else
         {
@@ -345,6 +361,14 @@ namespace mxl::lib::fabrics::ofi
         }
 
         it->second.transferGrain(localIndex, remoteIndex, payloadOffset, SliceRange::make(startSlice, endSlice));
+    }
+
+    void RCInitiator::transferSamples(std::uint64_t headIndex, std::size_t count)
+    {
+        for (auto& [_, target] : _targets)
+        {
+            target.transferSamples(headIndex, count);
+        }
     }
 
     bool RCInitiator::hasPendingWork() const noexcept
