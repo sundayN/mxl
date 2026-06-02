@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2025 Contributors to the Media eXchange Layer project.
+# SPDX-License-Identifier: CC-BY-4.0
+
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - docs-action # for testing
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          Optional branch or tag to build docs from. Leave empty to build the
+          ref this workflow runs on. Use this to (re)build docs for historical
+          tags whose own copy of this workflow predates workflow_dispatch.
+        required: false
+        default: ""
+      alias_latest:
+        description: "Also publish this build under the 'latest' alias"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Always check out the ref that triggered the run (or main, for dispatch)
+      # so we get the current workflow infrastructure (.github/scripts, etc.).
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # If the user dispatched with a specific ref, overlay only the docs
+      # sources from that ref. We keep main's .github/ so prepare-docs.sh
+      # exists even when building old tags.
+      - name: Overlay docs sources from selected ref
+        if: ${{ inputs.ref != '' }}
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          git checkout "${INPUT_REF}" -- docs/ README.md
+
+      # Decide which ref name to publish as (used by mike and by the URL
+      # rewriting in prepare-docs.sh). For dispatched runs with an input,
+      # use that; otherwise fall back to the triggering ref.
+      - name: Determine build ref
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [[ -n "${INPUT_REF}" ]]; then
+            BUILD_REF="${INPUT_REF}"
+          else
+            BUILD_REF="${GITHUB_REF_NAME}"
+          fi
+          echo "BUILD_REF=${BUILD_REF}" >> "$GITHUB_ENV"
+          echo "Building docs as version: ${BUILD_REF}"
+
+      - name: Fetch gh-pages branch
+        run: git fetch origin gh-pages --depth=1 || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+
+      - run: pip install zensical
+      - run: pip install git+https://github.com/squidfunk/mike.git
+
+      - name: Prepare docs/ tree for site build
+        run: ./.github/scripts/prepare-docs.sh
+
+      - run: zensical build --clean
+
+      - name: Check for broken links with lychee
+        uses: lycheeverse/lychee-action@v1.8.0
+        with:
+          args: ./site/**/*.html -- --root-dir ./site
+
+      # Configure git for mike to push to gh-pages
+      - name: Configure git for mike
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Deploy docs with mike. Versioning logic:
+      #   - push to branch:      deploy as <branch>, alias 'latest'
+      #   - push to tag:         deploy as <tag>, no alias
+      #   - workflow_dispatch:   deploy as <BUILD_REF>; alias 'latest' only
+      #                          if explicitly requested via the input.
+      - name: Deploy docs with mike
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALIAS_LATEST: ${{ inputs.alias_latest }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${ALIAS_LATEST}" == "true" ]]; then
+              mike deploy --push --update-aliases "${BUILD_REF}" latest
+            else
+              mike deploy --push "${BUILD_REF}"
+            fi
+          elif [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
+            mike deploy --push --update-aliases "${BUILD_REF}" latest
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            mike deploy --push --update-aliases "${BUILD_REF}"
+          fi

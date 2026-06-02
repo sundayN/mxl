@@ -9,3 +9,8 @@ CMakeUserPresets.json
 
 .idea
 .vscode
+
+site
+
+# Generated from README.md by the docs workflow
+docs/index.md
