@@ -25,7 +25,7 @@ volumes:
 
 services:
   # SERVER B: The Receiver (Target)
-  fabrics-target:
+  fabrics-target-video:
     <<: *rdma-settings
     build:
       dockerfile: examples/Dockerfile
@@ -46,9 +46,29 @@ services:
       --node <RECEIVER_RDMA_IP> 
       --service 5000 
       --provider verbs
+  fabrics-target-audio:
+    <<: *rdma-settings
+    build:
+      dockerfile: examples/Dockerfile
+      context: ..
+      target: mxl
+    volumes:
+      - type: volume
+        source: mxl-domain
+        target: /mxl-domain
+      - type: bind
+        source: flow-configs
+        target: /home/mxl/flow-configs
+    entrypoint: ["/usr/bin/mxl-fabrics-demo"]
+    command: >
+      -d /mxl-domain 
+      -f flow-configs/flow-audio.json
+      --node <RECEIVER_RDMA_IP> 
+      --service 5001
+      --provider verbs
 
   # SERVER A: The Sender (Initiator)
-  fabrics-initiator:
+  fabrics-initiator-video:
     <<: *rdma-settings
     build:
       dockerfile: examples/Dockerfile
@@ -67,5 +87,27 @@ services:
       -f 5fbec3b1-1b0f-417d-9059-8b94a47197ed 
       --node <SENDER_RDMA_IP> 
       --service 5000 
+      --provider verbs 
+      --target-info "${TARGET_INFO:-}"
+  # SERVER A: Sender Audio
+  fabrics-initiator-audio:
+    <<: *rdma-settings
+    build:
+      dockerfile: examples/Dockerfile
+      context: ..
+      target: mxl
+    volumes:
+      - type: volume
+        source: mxl-domain
+        target: /mxl-domain
+    # Override the bash entrypoint from the Dockerfile
+    entrypoint: ["/usr/bin/mxl-fabrics-demo"]
+    # Added :- to silence the empty variable warning
+    command: >
+      -i 
+      -d /mxl-domain 
+      -f 5fbec3b1-1b0f-417d-9059-8b94a47197ed 
+      --node <SENDER_RDMA_IP> 
+      --service 5001
       --provider verbs 
       --target-info "${TARGET_INFO:-}"

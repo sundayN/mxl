@@ -50,13 +50,13 @@ sudo ip link set enp152s0f0np0 down && sudo ip link set enp152s0f0np0 up
 
 The Target must be started first: it allocates the receive memory region and prints a `TARGET_INFO` blob that the Initiator needs in order to connect.
 
-1. Start the fabrics target. It will block, holding the RDMA listener open, and print the `TARGET_INFO` JSON to stdout:
+1. Start the fabrics targets (video on port 5000, audio on port 5001). Each will block, holding an RDMA listener open, and print its own `TARGET_INFO` JSON to stdout:
 
     ```
-    docker compose -f docker-compose-fabrics.yaml up fabrics-target
+    docker compose -f docker-compose-fabrics.yaml up fabrics-target-video fabrics-target-audio
     ```
 
-1. Copy the `TARGET_INFO` line from the logs — it has to be hand-carried to the Initiator (out of band, e.g. chat or SSH).
+1. Copy the `TARGET_INFO` line from each service's logs — they have to be hand-carried to the Initiator (out of band, e.g. chat or SSH). You will have one `TARGET_INFO` for video and one for audio.
 
 1. Bind-mount the MXL domain volume to `/dev/shm/mxl` so host tools (and the next step's `echo`) can see the same domain the container sees. The helper script resolves the Docker volume mountpoint and `mount --bind`s it:
 
@@ -95,10 +95,18 @@ The Initiator needs an existing MXL flow in its local domain before it can push 
 
     This writes the same `5fbec3b1-…` test video flow into `mxl-example_mxl-domain`, so the initiator step below works unchanged.
 
-1. Start `mxl-fabrics-demo` in initiator mode, passing the `TARGET_INFO` captured earlier. The container will open the RDMA connection and begin writing frames into the Target's memory:
+1. Start `mxl-fabrics-demo` in initiator mode, passing the `TARGET_INFO` captured earlier. Each container will open an RDMA connection and begin writing frames into the Target's memory.
+
+    Video:
 
     ```
-    TARGET_INFO="{{ PASTE_TARGET_INFO_HERE }}" docker compose -f docker-compose-fabrics.yaml up fabrics-initiator
+    TARGET_INFO="{{ PASTE_VIDEO_TARGET_INFO }}" docker compose -f docker-compose-fabrics.yaml up fabrics-initiator-video
+    ```
+
+    Audio:
+
+    ```
+    TARGET_INFO="{{ PASTE_AUDIO_TARGET_INFO }}" docker compose -f docker-compose-fabrics.yaml up fabrics-initiator-audio
     ```
 
 ## Demo teardown
