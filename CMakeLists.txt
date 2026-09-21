@@ -18,10 +18,10 @@ option(MXL_ENABLE_FABRICS_OFI "Enable building the fabrics library with libfabri
 
 # Build type. Used as a build suffix or in the operating system package file name.  Currently manually set but could be automated using branch names, etc.
 # One of : dev, beta, rc, "" (empty for final releases)
-set(MXL_BUILD_TYPE "dev")
+set(MXL_BUILD_TYPE "")
 set(MXL_BUILD_SUFFIX "-${MXL_BUILD_TYPE}")
 
-set(mxl_VERSION 1.1.0)
+set(mxl_VERSION 1.2.0)
 
 if(DEFINED MXL_BUILD_NUMBER)
     string(APPEND mxl_VERSION ".${MXL_BUILD_NUMBER}")

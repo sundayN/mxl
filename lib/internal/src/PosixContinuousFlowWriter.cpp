@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "PosixContinuousFlowWriter.hpp"
+#include <cstring>
+#include <algorithm>
 #include <stdexcept>
 #include <mxl/time.h>
 #include "mxl-internal/Sync.hpp"
@@ -15,6 +17,8 @@ namespace mxl::lib
         , _channelCount{_flowData->channelCount()}
         , _bufferLength{_flowData->channelBufferLength()}
         , _currentIndex{MXL_UNDEFINED_INDEX}
+        , _currentCount{0U}
+        , _lastCommittedIndex{MXL_UNDEFINED_INDEX}
         , _syncBatchSize{1U}
         , _earlySyncThreshold{}
         , _lastSyncSampleBatch{}
@@ -77,6 +81,20 @@ namespace mxl::lib
         {
             if (count <= (_bufferLength / 2))
             {
+                if (index < count)
+                {
+                    return MXL_ERR_INVALID_ARG;
+                }
+
+                auto const writeStartIndex = index - count;
+                if (_lastCommittedIndex != MXL_UNDEFINED_INDEX)
+                {
+                    if ((index <= _lastCommittedIndex) || (writeStartIndex < _lastCommittedIndex))
+                    {
+                        return MXL_ERR_INVALID_ARG;
+                    }
+                }
+
                 auto const startOffset = (index + _bufferLength - count) % _bufferLength;
                 auto const endOffset = (index % _bufferLength);
 
@@ -96,6 +114,7 @@ namespace mxl::lib
                 payloadBufferSlices.count = _channelCount;
 
                 _currentIndex = index;
+                _currentCount = count;
 
                 return MXL_STATUS_OK;
             }
@@ -109,9 +128,43 @@ namespace mxl::lib
     {
         if (_flowData)
         {
+            if (_currentIndex == MXL_UNDEFINED_INDEX)
+            {
+                return MXL_ERR_INVALID_ARG;
+            }
+
+            // Invalidate any skipped samples in the writable ring. This prevents readers from
+            // seeing stale payload data when the producer introduces a write gap.
+            auto const writeStartIndex = _currentIndex - _currentCount;
+            if (_lastCommittedIndex != MXL_UNDEFINED_INDEX && writeStartIndex > _lastCommittedIndex)
+            {
+                auto const skippedCount = writeStartIndex - _lastCommittedIndex;
+                auto const clearableLength = _bufferLength - _currentCount;
+                auto const clearedCount = std::min<std::uint64_t>(skippedCount, clearableLength);
+                auto const gapEndIndex = writeStartIndex;
+
+                auto const clearStartOffset = (gapEndIndex + _bufferLength - clearedCount) % _bufferLength;
+                auto const clearEndOffset = gapEndIndex % _bufferLength;
+                auto const firstClearLength = (clearStartOffset < clearEndOffset) ? clearedCount : _bufferLength - clearStartOffset;
+                auto const secondClearLength = clearedCount - firstClearLength;
+
+                auto const sampleWordSize = _flowData->sampleWordSize();
+                auto const channelStride = sampleWordSize * _bufferLength;
+                auto* const baseBufferPtr = static_cast<std::uint8_t*>(_flowData->channelData());
+
+                for (auto channel = std::size_t{0}; channel < _channelCount; ++channel)
+                {
+                    auto* const channelBasePtr = baseBufferPtr + (channel * channelStride);
+                    std::memset(channelBasePtr + (sampleWordSize * clearStartOffset), 0, sampleWordSize * firstClearLength);
+                    std::memset(channelBasePtr, 0, sampleWordSize * secondClearLength);
+                }
+            }
+
             auto const flow = _flowData->flow();
             flow->info.runtime.headIndex = _currentIndex;
+            _lastCommittedIndex = _currentIndex;
             _currentIndex = MXL_UNDEFINED_INDEX;
+            _currentCount = 0U;
 
             if (signalCompletedBatch())
             {
@@ -132,12 +185,14 @@ namespace mxl::lib
     mxlStatus PosixContinuousFlowWriter::cancel()
     {
         _currentIndex = MXL_UNDEFINED_INDEX;
+        _currentCount = 0U;
         return MXL_STATUS_OK;
     }
 
     bool PosixContinuousFlowWriter::signalCompletedBatch() noexcept
     {
-        auto const currentSyncSampleBatch = _currentIndex / _syncBatchSize;
+        auto const flow = _flowData->flow();
+        auto const currentSyncSampleBatch = flow->info.runtime.headIndex / _syncBatchSize;
         if (currentSyncSampleBatch < _lastSyncSampleBatch)
         {
             return false;
@@ -145,7 +200,7 @@ namespace mxl::lib
         if (currentSyncSampleBatch == _lastSyncSampleBatch)
         {
             // Signal now before overshooting the maximum the next time around
-            if ((_currentIndex % _syncBatchSize) > _earlySyncThreshold)
+            if ((flow->info.runtime.headIndex % _syncBatchSize) > _earlySyncThreshold)
             {
                 _lastSyncSampleBatch = currentSyncSampleBatch + 1U;
             }

@@ -7,7 +7,6 @@ use std::{
 };
 
 use glib::subclass::types::ObjectSubclassExt;
-use gst::ClockTime;
 use gst_base::prelude::*;
 use gstreamer as gst;
 use gstreamer_base as gst_base;
@@ -15,7 +14,7 @@ use mxl::{FlowReader, MxlInstance, config::get_mxl_so_path, flowdef::*};
 
 use crate::mxlsrc::{
     imp::*,
-    state::{AudioState, DataState, InitialTime, Settings, State, VideoState},
+    state::{ContinuousState, DiscreteFormat, DiscreteState, FlowState, Settings, State},
 };
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
@@ -32,6 +31,15 @@ pub(crate) fn get_flow_type_id<'a>(
     settings
         .flow_id()
         .ok_or(gst::loggable_error!(CAT, "No flow id was found"))
+}
+
+/// Amount to subtract from a grain's absolute MXL timestamp to get its PTS in
+/// the pipeline running-time base: `D + base_time`. `offset` is the pipeline's
+/// shared `D` (see [`crate::clock::ClockOffsetExt`]); `base_time` is read live
+/// so a flushing seek that re-bases the pipeline is followed without re-sampling.
+pub(crate) fn pts_subtrahend(src: &MxlSrc, offset: u64) -> Result<u64, gst::FlowError> {
+    let base_time = src.obj().base_time().ok_or(gst::FlowError::Error)?;
+    Ok(offset.saturating_add(base_time.nseconds()))
 }
 
 pub(crate) fn get_mxl_flow_json(
@@ -153,37 +161,57 @@ enum FlowKind {
     Data,
 }
 
+/// How long the `FlowNotFound` wait sleeps between attempts, and so how often
+/// it rechecks `is_flushing`.
+pub(crate) const FLOW_NOT_FOUND_RETRY: Duration = Duration::from_millis(50);
+
+/// Successful return of [`init`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Init {
+    /// Reader stored in `flow_state`.
+    Attached,
+    /// `is_flushing` became true during the `FlowNotFound` wait; no reader yet.
+    Flushing,
+}
+
 /// Blocks until `create_flow_reader` succeeds, sleeping briefly and retrying
 /// while MXL returns `FlowNotFound`.
 ///
-/// Before each attempt, checks `is_flushing` and returns an error if so, to
+/// Before each attempt, checks `is_flushing` and returns `Ok(None)` if so, to
 /// avoid blocking teardown via `unlock` if the flow has not yet been created.
 ///
-/// `domain` and `flow_id` are passed in by the caller (typically cloned under a
-/// short `settings` lock in `init`) so this function never holds
+/// `flow_id` is passed in by the caller (typically cloned under a short
+/// `settings` lock in `init`) so this function never holds
 /// `MutexGuard<Settings>` across `thread::sleep` in the `FlowNotFound` loop.
 fn init_mxl_reader(
     mxlsrc: &MxlSrc,
-    domain: &str,
+    instance: &MxlInstance,
     flow_id: &str,
-) -> Result<FlowReader, gst::ErrorMessage> {
-    let mxl_instance = init_mxl_instance(domain)?;
+) -> Result<Option<FlowReader>, gst::ErrorMessage> {
     let mut warned = false;
     loop {
         if is_flushing(mxlsrc) {
-            return Err(gst::error_msg!(
-                gst::CoreError::Failed,
-                ["Aborted waiting for flow"]
-            ));
+            gst::debug!(
+                CAT,
+                imp = mxlsrc,
+                "Flushing; stop waiting for flow {}",
+                flow_id
+            );
+            return Ok(None);
         }
-        match mxl_instance.create_flow_reader(flow_id) {
-            Ok(reader) => break Ok(reader),
+        match instance.create_flow_reader(flow_id) {
+            Ok(reader) => break Ok(Some(reader)),
             Err(mxl::Error::FlowNotFound) => {
                 if !warned {
-                    eprintln!("Waiting for flow to be created...");
+                    gst::info!(
+                        CAT,
+                        imp = mxlsrc,
+                        "Waiting for flow {} to be created",
+                        flow_id
+                    );
                     warned = true;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(FLOW_NOT_FOUND_RETRY);
                 continue;
             }
             Err(err) => {
@@ -196,7 +224,7 @@ fn init_mxl_reader(
     }
 }
 
-fn is_flushing(mxlsrc: &MxlSrc) -> bool {
+pub(crate) fn is_flushing(mxlsrc: &MxlSrc) -> bool {
     mxlsrc
         .clock_wait
         .lock()
@@ -204,19 +232,64 @@ fn is_flushing(mxlsrc: &MxlSrc) -> bool {
         .unwrap_or(true)
 }
 
-pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<(), gst::ErrorMessage> {
-    let (domain, flow_kind, flow_id) = {
+/// The MXL instance, created on first use and cached in `Context` so the
+/// reader and the timestamp conversions all share it. Idempotent and race-safe:
+/// the first caller wins, later callers reuse the cached instance.
+pub(crate) fn ensure_instance(mxlsrc: &MxlSrc) -> Result<MxlInstance, gst::ErrorMessage> {
+    if let Some(instance) = mxlsrc
+        .context
+        .lock()
+        .map_err(|e| {
+            gst::error_msg!(
+                gst::CoreError::Failed,
+                ["Failed to get context mutex: {}", e]
+            )
+        })?
+        .instance
+        .clone()
+    {
+        return Ok(instance);
+    }
+
+    let domain = mxlsrc
+        .settings
+        .lock()
+        .map_err(|_| gst::error_msg!(gst::CoreError::Failed, ["Missing settings"]))?
+        .domain
+        .clone();
+    if domain.is_empty() {
+        return Err(gst::error_msg!(gst::CoreError::Failed, ["domain not set"]));
+    }
+    let instance = init_mxl_instance(domain.as_str())?;
+
+    let mut context = mxlsrc.context.lock().map_err(|e| {
+        gst::error_msg!(
+            gst::CoreError::Failed,
+            ["Failed to get context mutex: {}", e]
+        )
+    })?;
+    // Lost the race while we were creating ours: keep the winner's instance.
+    if let Some(instance) = context.instance.clone() {
+        return Ok(instance);
+    }
+    context.instance = Some(instance.clone());
+    Ok(instance)
+}
+
+/// Attach a flow reader. `Ok(Init::Flushing)` means `unlock()` broke the
+/// `FlowNotFound` wait; the caller should return `FlowError::Flushing`.
+pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<Init, gst::ErrorMessage> {
+    let (flow_kind, flow_id) = {
         let settings = mxlsrc
             .settings
             .lock()
             .map_err(|_| gst::error_msg!(gst::CoreError::Failed, ["Missing settings"]))?;
-        let domain = settings.domain.clone();
         if let Some(flow_id) = settings.video_flow.clone() {
-            (domain, FlowKind::Video, flow_id)
+            (FlowKind::Video, flow_id)
         } else if let Some(flow_id) = settings.audio_flow.clone() {
-            (domain, FlowKind::Audio, flow_id)
+            (FlowKind::Audio, flow_id)
         } else if let Some(flow_id) = settings.data_flow.clone() {
-            (domain, FlowKind::Data, flow_id)
+            (FlowKind::Data, flow_id)
         } else {
             return Err(gst::error_msg!(
                 gst::CoreError::Failed,
@@ -225,9 +298,13 @@ pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<(), gst::ErrorMessage> {
         }
     };
 
+    let instance = ensure_instance(mxlsrc)?;
+
     // Wait for the flow to be created without holding `settings` or `context` mutexes
     // across the poll/sleep loop.
-    let reader = init_mxl_reader(mxlsrc, domain.as_str(), flow_id.as_str())?;
+    let Some(reader) = init_mxl_reader(mxlsrc, &instance, flow_id.as_str())? else {
+        return Ok(Init::Flushing);
+    };
     let binding = reader.get_info();
     let reader_info = binding.as_ref();
 
@@ -238,17 +315,6 @@ pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<(), gst::ErrorMessage> {
         )
     })?;
 
-    let instance = init_mxl_instance(domain.as_str()).map_err(|e| {
-        gst::error_msg!(
-            gst::CoreError::Failed,
-            ["Failed to initialize MXL instance: {}", e]
-        )
-    })?;
-
-    let initial_info = InitialTime {
-        mxl_index: 0,
-        gst_time: ClockTime::from_mseconds(0),
-    };
     match flow_kind {
         FlowKind::Video => {
             let grain_rate = reader_info
@@ -276,19 +342,20 @@ pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<(), gst::ErrorMessage> {
 
             context.state = Some(State {
                 instance,
-                initial_info,
-                video: Some(VideoState {
+                flow_state: Some(FlowState::Discrete(DiscreteState {
+                    format: DiscreteFormat::Video,
                     grain_rate,
-                    frame_counter: 0,
+                    index: 0,
                     is_initialized: false,
+                    next_discont: false,
                     grain_reader,
-                }),
-                audio: None,
-                data: None,
+                })),
             });
         }
         FlowKind::Audio => {
-            let reader_samples = init_mxl_reader(mxlsrc, domain.as_str(), flow_id.as_str())?;
+            let Some(reader_samples) = init_mxl_reader(mxlsrc, &instance, flow_id.as_str())? else {
+                return Ok(Init::Flushing);
+            };
             let samples_reader = reader_samples.to_samples_reader().map_err(|e| {
                 gst::error_msg!(
                     gst::CoreError::Failed,
@@ -297,17 +364,13 @@ pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<(), gst::ErrorMessage> {
             })?;
             context.state = Some(State {
                 instance,
-                initial_info,
-                video: None,
-                audio: Some(AudioState {
+                flow_state: Some(FlowState::Continuous(ContinuousState {
                     reader,
                     samples_reader,
-                    batch_counter: 0,
                     is_initialized: false,
                     index: 0,
                     next_discont: false,
-                }),
-                data: None,
+                })),
             });
         }
         FlowKind::Data => {
@@ -336,19 +399,18 @@ pub(crate) fn init(mxlsrc: &MxlSrc) -> Result<(), gst::ErrorMessage> {
 
             context.state = Some(State {
                 instance,
-                initial_info,
-                video: None,
-                audio: None,
-                data: Some(DataState {
+                flow_state: Some(FlowState::Discrete(DiscreteState {
+                    format: DiscreteFormat::Data,
                     grain_rate,
-                    frame_counter: 0,
+                    index: 0,
                     is_initialized: false,
+                    next_discont: false,
                     grain_reader,
-                }),
+                })),
             });
         }
     }
-    Ok(())
+    Ok(Init::Attached)
 }
 
 fn init_mxl_instance(domain: &str) -> Result<MxlInstance, gst::ErrorMessage> {
