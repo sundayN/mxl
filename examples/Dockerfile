@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-tools \
     gstreamer1.0-x \
     dumb-init \
+    # Runtime deps for libfabric's verbs provider, used by mxl-fabrics-demo
+    libibverbs1 \
+    librdmacm1 \
     && rm -r /var/lib/apt/lists/*
 
 #-----------------------------------------------------------------
@@ -30,6 +33,9 @@ RUN apt-get update && apt-get install -y \
     curl zip unzip tar \
     pkg-config \
     git \
+    autoconf \
+    automake \
+    libtool \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libfabric-dev
@@ -43,17 +49,14 @@ ENV MXL_REPO_ROOT="${HOME}/mxl"
 RUN mkdir "$MXL_REPO_ROOT"
 COPY ./ "$MXL_REPO_ROOT"
 
+# Install libfabric before configuring MXL so the fabrics build uses the same
+# headers and library that will be present in the image.
+RUN ${MXL_REPO_ROOT}/.devcontainer/scripts/common/libfabric/install.sh
+
 # Build MXL SDK
-RUN cmake -S "$MXL_REPO_ROOT" --preset Linux-GCC-Release -DCMAKE_INSTALL_PREFIX=/usr
+RUN cmake -S "$MXL_REPO_ROOT" --preset Linux-GCC-Release -DCMAKE_INSTALL_PREFIX=/usr -DMXL_ENABLE_FABRICS_OFI=ON
 RUN ninja -C "${MXL_REPO_ROOT}/build/Linux-GCC-Release"
 RUN ninja -C "${MXL_REPO_ROOT}/build/Linux-GCC-Release" install
-
-# Install libfabric
-RUN apt-get install -y --no-install-recommends \
-    autoconf \
-    automake \
-    libtool
-RUN ${MXL_REPO_ROOT}/.devcontainer/scripts/common/libfabric/install.sh
 
 # Install GST dependencies for rust plugins
 RUN apt-get install -y --no-install-recommends \
@@ -101,6 +104,9 @@ FROM base AS mxl
 
 ARG  LIB="/usr/lib/x86_64-linux-gnu"
 COPY --from=builder "${LIB}/libmxl*" "${LIB}/"
+# libfabric is built from source with a plain "/usr" prefix, so it lands in
+# /usr/lib rather than the multiarch libdir used for libmxl above.
+COPY --from=builder "/usr/lib/libfabric*" "/usr/lib/"
 COPY --from=builder "/usr/bin/mxl-*" "/usr/bin/"
 COPY --from=builder "${LIB}/gstreamer-1.0/libgstmxl.so" "${LIB}/gstreamer-1.0/"
 COPY --from=builder "${LIB}/gstreamer-1.0/libgstrsclosedcaption.so" "${LIB}/gstreamer-1.0/"
