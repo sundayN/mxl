@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-tools \
     gstreamer1.0-x \
     dumb-init \
+    libibverbs1 \
+    ibverbs-providers \
+    librdmacm1 \
     && rm -r /var/lib/apt/lists/*
 
 #-----------------------------------------------------------------
@@ -17,7 +20,6 @@ FROM base AS builder
 
 ENV HOME="/root" 
 
-# Install dependencie for SDK & gst demos
 ARG CLANG_VERSION=19
 RUN apt-get update && apt-get install -y \
     "clang-${CLANG_VERSION}" \
@@ -30,8 +32,14 @@ RUN apt-get update && apt-get install -y \
     curl zip unzip tar \
     pkg-config \
     git \
+    autoconf \
+    automake \
+    libtool \
     libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev
+    libgstreamer-plugins-base1.0-dev \
+    libfabric-dev \
+    libibverbs-dev \
+    librdmacm-dev
 
 RUN git clone https://github.com/microsoft/vcpkg.git "${HOME}/vcpkg" \
     && cd "${HOME}/vcpkg" \
@@ -42,17 +50,13 @@ ENV MXL_REPO_ROOT="${HOME}/mxl"
 RUN mkdir "$MXL_REPO_ROOT"
 COPY ./ "$MXL_REPO_ROOT"
 
+# Install custom libfabric required by MXL
+RUN ${MXL_REPO_ROOT}/.devcontainer/scripts/common/libfabric/install.sh
+
 # Build MXL SDK
-RUN cmake -S "$MXL_REPO_ROOT" --preset Linux-GCC-Release -DCMAKE_INSTALL_PREFIX=/usr
+RUN cmake -S "$MXL_REPO_ROOT" --preset Linux-GCC-Release -DCMAKE_INSTALL_PREFIX=/usr -DMXL_ENABLE_FABRICS_OFI=ON
 RUN ninja -C "${MXL_REPO_ROOT}/build/Linux-GCC-Release"
 RUN ninja -C "${MXL_REPO_ROOT}/build/Linux-GCC-Release" install
-
-# Install libfabric
-RUN apt-get install -y --no-install-recommends \
-    autoconf \
-    automake \
-    libtool
-RUN ${MXL_REPO_ROOT}/.devcontainer/scripts/common/libfabric/install.sh
 
 # Install GST dependencies for rust plugins
 RUN apt-get install -y --no-install-recommends \
@@ -73,17 +77,6 @@ RUN cd "${MXL_REPO_ROOT}/rust/" \
     && cargo build --release --features mxl-sys/mxl-not-built,mxl/mxl-not-built \
     && install -m 0644 "${MXL_REPO_ROOT}/rust/target/release/libgstmxl.so" \
          "/usr/lib/$(gcc -dumpmachine)/gstreamer-1.0/"
-
-# Build gst-plugin-rsclosedcaption from gst-plugins-rs. The closed-caption
-# and ST 2038 elements (cctost2038anc, st2038anctocc, tttocea608, cea608tott)
-# come from this plugin and aren't packaged on Ubuntu 24.04.
-#
-# Tag 0.14.5 is the latest release in the gst-plugins-rs 0.14 series.
-# 0.14 is the first release with cctost2038anc / st2038anctocc /
-# st2038ancdemux / st2038ancmux (added in 0.14.0) and targets gstreamer-rs
-# 0.24, matching gst-mxl-rs and the system GStreamer 1.24 ABI from apt.
-# 0.13.x doesn't ship the ST 2038 elements; main / 0.15.x targets
-# gstreamer-rs 0.26.
 RUN git clone --depth 1 --branch 0.14.5 \
         https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git \
         /tmp/gst-plugins-rs \
@@ -100,6 +93,12 @@ FROM base AS mxl
 
 ARG  LIB="/usr/lib/x86_64-linux-gnu"
 COPY --from=builder "${LIB}/libmxl*" "${LIB}/"
+
+# Copy compiled libfabric directly into multiarch directory to avoid system overrides
+COPY --from=builder "/usr/lib/libfabric*" "${LIB}/"
+
+# Copy compiled libfabric tools (fi_info, etc.) and MXL binaries
+COPY --from=builder "/usr/bin/fi_*" "/usr/bin/"
 COPY --from=builder "/usr/bin/mxl-*" "/usr/bin/"
 COPY --from=builder "${LIB}/gstreamer-1.0/libgstmxl.so" "${LIB}/gstreamer-1.0/"
 COPY --from=builder "${LIB}/gstreamer-1.0/libgstrsclosedcaption.so" "${LIB}/gstreamer-1.0/"
